@@ -1,0 +1,7 @@
+node_modules
+dist
+.claude/worktrees/
+.claude/settings.local.json
+tools/reports/
+# third-party car models: used locally only, never redistributed (licences unclear for some)
+public/models/*.glb
