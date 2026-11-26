@@ -14,34 +14,33 @@
 
     <!-- ===== top bar ===== -->
     <header id="topbar" class="hud">
-      <div class="brand">
-        <span class="logo">REV<b>ENGINE</b></span>
-        <small>Interactive 3D showroom · Database &amp; Web Systems</small>
-      </div>
+      <span class="logo">REV<b>ENGINE</b></span>
       <nav id="tabs">
         <button data-view="showroom" class="on">Showroom</button>
-        <button data-view="garage">Garage <em>SQL</em></button>
+        <button data-view="garage">Garage</button>
         <button data-view="compare">Compare</button>
         <button data-view="sqllab">SQL Lab</button>
       </nav>
       <div class="tools">
-        <button id="btn-loc" title="Location (L)"><span class="key">L</span><span id="loc-name">Location</span></button>
-        <button id="btn-ad" title="Ad mode (C)"><span class="key">C</span><span class="lbl">Ad mode</span></button>
-        <button id="btn-xray" title="X-ray (X)"><span class="key">X</span><span class="lbl">X-Ray</span></button>
-        <button id="btn-explode" title="Explode all (E)"><span class="key">E</span><span class="lbl">Explode</span></button>
-        <button id="btn-reset" title="Reset view (R)"><span class="key">R</span><span class="lbl">Reset</span></button>
-        <button id="btn-sound" title="Sound (M)" class="icon">🔊</button>
+        <button id="btn-loc" class="pill" title="Change location (L)"><span id="loc-name">Location</span><span class="caret">▾</span></button>
+        <button id="btn-sound" class="pill icon" title="Sound (M)">🔊</button>
       </div>
     </header>
 
-    <!-- ===== car info ===== -->
+    <!-- ===== car panel ===== -->
     <section id="carinfo" class="hud">
       <div class="maker" id="ci-maker"></div>
       <h1 class="model" id="ci-model"></h1>
       <p class="tagline" id="ci-tagline"></p>
-      <div class="chips" id="ci-chips"></div>
-      <div class="stats" id="ci-stats"></div>
-      <div class="price"><span>Est. price</span><b id="ci-price"></b></div>
+      <p class="specline" id="ci-chips"></p>
+      <div class="figs" id="ci-stats"></div>
+      <div class="price"><span>From</span><b id="ci-price"></b></div>
+      <div class="actions">
+        <button id="btn-engine" class="pill primary" title="Open the engine (or click the bonnet)">X-ray engine</button>
+        <button id="btn-explode" class="pill" title="Pull the whole car apart (E)">Explode</button>
+        <button id="btn-ad" class="pill" title="Car-advert camera (C)">▶ Ad mode</button>
+      </div>
+      <p class="hint">Hover the car to explore its parts · drag to look around</p>
     </section>
 
     <!-- ===== parts ===== -->
@@ -66,15 +65,12 @@
       <div id="cards"></div>
       <button class="nav next" aria-label="Next car">›</button>
     </footer>
-    <div id="hints" class="hud">
-      <span><kbd>Drag</kbd> orbit</span><span><kbd>Scroll</kbd> zoom</span><span><kbd>Hover</kbd> parts</span>
-      <span><kbd>Click</kbd> split apart</span><span><kbd>←</kbd><kbd>→</kbd> cars</span><span><kbd>C</kbd> ad mode</span><span><kbd>Esc</kbd> back</span>
-    </div>
     <div id="tooltip"></div>
     <div id="toast"></div>
     <section id="locations" class="hud"></section>
     <div id="loading"><span></span><b><i></i></b></div>
     <div id="adcard"></div>
+    <button id="ad-exit" class="pill" title="Leave Ad mode (Esc)">✕ Exit ad mode</button>
     <div id="fade"></div>
     <footer id="footnote" class="hud"><button id="btn-credits">Credits &amp; licences</button></footer>
 
@@ -143,7 +139,7 @@
       <div class="overlay-inner">
         <div class="overlay-head">
           <h2>SQL Lab</h2>
-          <p>Run your own queries against the RevEngine database. Tables: <code>manufacturers</code>, <code>engines</code>, <code>cars</code>, <code>part_types</code>, <code>car_parts</code> and the view <code>car_overview</code>.</p>
+          <p>Run your own queries against the RevEngine database. Tables: <code>manufacturers</code>, <code>engines</code>, <code>cars</code>, <code>part_types</code>, <code>car_parts</code>, <code>assets</code> and the view <code>car_overview</code>.</p>
         </div>
         <div class="lab-presets" id="lab-presets"></div>
         <textarea id="lab-input" spellcheck="false"></textarea>

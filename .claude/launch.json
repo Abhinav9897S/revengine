@@ -23,6 +23,19 @@
         "--strictPort"
       ],
       "port": 4173
+    },
+    {
+      "name": "revengine-pages",
+      "runtimeExecutable": "npx",
+      "runtimeArgs": [
+        "vite",
+        "preview",
+        "--port",
+        "4174",
+        "--strictPort",
+        "--base=/revengine/"
+      ],
+      "port": 4174
     }
   ]
 }

@@ -4,8 +4,8 @@
 //         tools/reports/<slug>.json (node names, materials, sizes; used to map clickable parts)
 import { NodeIO } from '@gltf-transform/core';
 import { ALL_EXTENSIONS } from '@gltf-transform/extensions';
-import { dedup, prune, textureCompress, meshopt, getBounds } from '@gltf-transform/functions';
-import { MeshoptEncoder, MeshoptDecoder } from 'meshoptimizer';
+import { dedup, prune, textureCompress, meshopt, getBounds, metalRough, weld, simplify } from '@gltf-transform/functions';
+import { MeshoptEncoder, MeshoptDecoder, MeshoptSimplifier } from 'meshoptimizer';
 import sharp from 'sharp';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -57,12 +57,53 @@ const report = {
   nodes,
 };
 
+// Older Sketchfab conversions use spec/gloss materials, which three.js no longer reads, and some
+// (game rips) keep every colour in the specular texture over a black diffuse. Move such colour
+// into the diffuse slot before converting, or the car comes out as speckled chrome.
+const darkImage = async (tex) => {
+  try {
+    const c = (await sharp(Buffer.from(tex.getImage())).stats()).channels.map((ch) => ch.mean);
+    const lum = c.length >= 3 ? 0.2126 * c[0] + 0.7152 * c[1] + 0.0722 * c[2] : c[0]; // grey images have one channel
+    return lum < 14;
+  } catch { return false; }
+};
+for (const mat of root.listMaterials()) {
+  const sg = mat.getExtension('KHR_materials_pbrSpecularGlossiness');
+  const spec = sg?.getSpecularGlossinessTexture();
+  if (!spec) continue;
+  const diffTex = sg.getDiffuseTexture();
+  const f = sg.getDiffuseFactor();
+  const diffDark = diffTex ? await darkImage(diffTex) : 0.2126 * f[0] + 0.7152 * f[1] + 0.0722 * f[2] < 0.05;
+  if (!diffDark) continue;
+  const uv = sg.getSpecularGlossinessTextureInfo().getTexCoord();
+  sg.setDiffuseFactor([1, 1, 1, f[3]]);
+  sg.setDiffuseTexture(spec);
+  sg.getDiffuseTextureInfo().setTexCoord(uv);
+  sg.setSpecularGlossinessTexture(null);
+  sg.setSpecularFactor([0.04, 0.04, 0.04]);
+  sg.setGlossinessFactor(0.6);
+}
+
+// Web budget: textures at most 1024 px (a quarter of the video memory of 2048 px, and at
+// showroom distance they look the same), and very dense models simplified to about 450k
+// triangles with a tight error bound so the silhouette and panel lines don't move.
+await MeshoptSimplifier.ready;
+const TRI_BUDGET = 450000;
+const totalTris = nodes.reduce((a, n) => a + n.tris, 0);
+const reduce = totalTris > TRI_BUDGET ? [weld(), simplify({ simplifier: MeshoptSimplifier, ratio: TRI_BUDGET / totalTris, error: 0.0015 })] : [];
 await doc.transform(
+  metalRough(),
   dedup(),
+  ...reduce,
   prune({ keepLeaves: true, keepAttributes: true }),
-  textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [2048, 2048], quality: 86 }),
+  textureCompress({ encoder: sharp, targetFormat: 'webp', resize: [1024, 1024], quality: 86 }),
   meshopt({ encoder: MeshoptEncoder, level: 'medium' }),
 );
+if (reduce.length) {
+  let after = 0;
+  for (const mesh of root.listMeshes()) for (const prim of mesh.listPrimitives()) { const idx = prim.getIndices(); after += idx ? idx.getCount() / 3 : prim.getAttribute('POSITION').getCount() / 3; }
+  console.log(`${slug}: simplified ${Math.round(totalTris / 1000)}k -> ${Math.round(after / 1000)}k triangles`);
+}
 fs.mkdirSync('public/models', { recursive: true });
 fs.mkdirSync('tools/reports', { recursive: true });
 const out = `public/models/${slug}.glb`;

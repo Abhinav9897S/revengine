@@ -22,6 +22,14 @@ npm run preview
 
 The `dist/` folder is the whole website.
 
+**Live site:** https://abhinav9897s.github.io/revengine/ (GitHub Pages, served from the `gh-pages` branch). To publish an update, build for that address and push `dist/` to `gh-pages`:
+
+```powershell
+npm run build:pages
+```
+
+The car models are not in the source code (`public/models/*.glb` is git-ignored); a build copies the ones imported on your computer into `dist/`.
+
 ## Adding the real 3D car models
 
 The hyper-real cars are artist-made models from Sketchfab (free, but you need a Sketchfab account to download). Until a model is imported, that car uses its code-built "blueprint" version.
@@ -33,16 +41,17 @@ The hyper-real cars are artist-made models from Sketchfab (free, but you need a 
 npm run models
 ```
 
-The importer finds each car in Downloads, compresses it (Meshopt geometry, WebP textures) into `public/models/`, and updates `public/models/manifest.json`. Reload the page: imported cars show a **3D** badge.
+The importer finds each car in Downloads, compresses it (Meshopt geometry, WebP textures) into `public/models/`, and updates `public/models/manifest.json`. Older spec/gloss conversions are turned into metal/rough materials on the way in. Reload the page: imported cars show a **3D** badge.
 
 The loader (`src/three/realCar.js`) then:
 
 - scales the model to the car's real length and turns it to face forward
-- upgrades materials: clear-coat paint with metallic flake, tinted glass, chrome, rubber
-- finds the parts by name and position: wheels (split per corner if needed), doors with hinges, bonnet/engine cover, lights, wing, exhaust and cabin
-- adds the code-built engine, chassis and exhaust inside the body for X-ray mode
+- repaints the body to the car's factory colour and upgrades materials: clear-coat paint with metallic flake, tinted glass and lenses, chrome, rubber
+- finds the wheels from where the tyres touch the ground, so models that merge all four wheels (or wheels and bumpers) into one object still get four spinning, splittable wheels; hundreds of tiny wheel pieces are merged to keep it fast
+- finds the other parts by name and position: doors with hinges, bonnet/engine cover, head and tail lights (lit at night), wing, exhaust and cabin; on one-piece bodies the top of the body over the engine still opens the X-ray
+- adds the engine, chassis and exhaust inside the body for X-ray mode
 
-If a model faces the wrong way, set `yaw` for that car in `src/data/realModels.js`.
+Per-model fixes live in `src/data/realModels.js`: `yaw` (wrong way round), `paint` and `lamps` (material names), `rx` (part-name patterns), `flakes`, `frontSide` and `keepPaint`.
 
 ## Locations
 
@@ -51,7 +60,7 @@ Real 360° HDR photos from Poly Haven (CC0) light the car, appear in its reflect
 | Location | Photo | Extras |
 | --- | --- | --- |
 | Rooftop car park, twilight | rooftop_night | headlights on |
-| Neon riverside, night | shanghai_bund | rain, headlight beams |
+| Neon riverside, night | shanghai_bund | rain, headlights on |
 | Desert highway, midday | nowhere_road | sun shadows from the photo's sun |
 | Underground garage | parking_garage | headlights on |
 | Studio reveal | studio_small_09 | infinity cove, softboxes, mirror floor |
@@ -63,7 +72,7 @@ Switch with the **Location** button or the `L` key.
 | Action | How |
 | --- | --- |
 | Orbit / zoom | Drag / scroll |
-| Highlight a part | Hover it (cyan glow and name tag) |
+| Highlight a part | Hover it (outline and name tag) |
 | Split a part apart | Click it: wheels, doors, lights, wing, exhaust, cabin, chassis |
 | X-ray engine | Click the **bonnet** (or engine cover): the body turns to a ghost, the engine rises and splits apart with labels |
 | Ad mode | `C`: commercial camera shots, letterbox, depth of field, title cards |
@@ -85,7 +94,8 @@ Switch with the **Location** button or the `L` key.
 | Ground | Ground-projected 360° photo (GroundedSkybox), blurred contact shadows, ambient occlusion (GTAO) |
 | Camera | Depth of field (Bokeh), Ad-mode shot list, cinematic 2.39:1 letterbox |
 | Film look | Khronos PBR Neutral tone mapping, colour grade, subtle chromatic aberration, vignette, grain, bloom |
-| Night | Headlight light pools and beams, rain |
+| Night | Lamps lit on the real models, headlight pools on the ground, rain |
+| X-ray parts | Real finishes generated in the browser: sand-cast aluminium, machined steel, wrinkle-finish cam covers, carbon twill, heat-tinted headers, battery cells; ringed pistons, I-beam rods, counterweighted crank; a key light follows the camera |
 | Models | glTF + Meshopt + WebP, BVH-accelerated picking (three-mesh-bvh) |
 
 ## Tech stack

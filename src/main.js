@@ -8,7 +8,7 @@ import { createStage } from './three/stage.js';
 import { Atmosphere, SCENES } from './three/atmosphere.js';
 import { buildCar } from './three/carBuilder.js';
 import { loadRealCar } from './three/realCar.js';
-import { Showroom } from './three/showroom.js';
+import { Showroom, homeView, releaseGPU } from './three/showroom.js';
 import { Cinema } from './three/cinema.js';
 import { EngineAudio } from './ui/audio.js';
 import { createUI } from './ui/ui.js';
@@ -37,6 +37,17 @@ function progress(p, text) {
   if (text) $('#load-status').textContent = text;
 }
 
+// card placeholder until the real model's photo exists: dark card, a glow of the car's colour,
+// a plain silhouette
+function placeholderThumb(paint) {
+  const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="480" height="270" viewBox="0 0 480 270">
+<defs><radialGradient id="g" cx="50%" cy="78%" r="60%"><stop offset="0" stop-color="${paint}" stop-opacity="0.45"/><stop offset="1" stop-color="#15111b" stop-opacity="0"/></radialGradient></defs>
+<rect width="480" height="270" fill="#15111b"/><rect width="480" height="270" fill="url(#g)"/>
+<path d="M70 196 C78 172 118 162 168 154 L214 124 C252 106 322 104 356 126 L404 152 C426 158 438 172 440 196 Z" fill="#ffffff" fill-opacity="0.07"/>
+<circle cx="146" cy="198" r="25" fill="#0b090e"/><circle cx="368" cy="198" r="25" fill="#0b090e"/></svg>`;
+  return `data:image/svg+xml;charset=utf-8,${encodeURIComponent(svg)}`;
+}
+
 function infoFor(row, parts) {
   const w = parts.wheels?.spec || '';
   const m = w.match(/^(.*?) front, (.*?) rear$/);
@@ -60,38 +71,52 @@ async function boot() {
   const atmosphere = new Atmosphere(stage, { quality });
   stage.onTick((dt) => atmosphere.update(dt));
   const saved = params.get('scene') || localStorage.getItem('rev-scene');
-  const startScene = SCENES.find((s) => s.id === saved) || SCENES[0];
+  // first visit: the studio (black infinity cove, mirror floor) shows the cars at their cleanest
+  const startScene = SCENES.find((s) => s.id === saved) || SCENES.find((s) => s.id === 'studio');
   progress(0.1, `Developing the ${startScene.name.toLowerCase()} photo…`);
   await atmosphere.set(startScene.id, (p) => progress(0.1 + p * 0.2));
 
-  // code-built cars: used for thumbnails, as a fallback, and for the X-ray engines/chassis
+  // code-built cars: the X-ray engines/chassis of the real models, and the fallback if a model
+  // fails. Built on demand (the first one now, the rest as their real models load), so the
+  // showroom opens without building all ten up front.
+  const partsBySlug = new Map(rows.map((r) => [r.slug, getParts(r.slug)]));
   const proc = new Map();
-  const partsBySlug = new Map();
-  for (let i = 0; i < rows.length; i++) {
-    const row = rows[i];
-    progress(0.32 + (0.4 * i) / rows.length, `Preparing the ${row.manufacturer} ${row.model}…`);
-    await frame();
-    const parts = getParts(row.slug);
-    partsBySlug.set(row.slug, parts);
-    const car = buildCar(row.slug, DESIGNS[row.slug], infoFor(row, parts));
-    car.info = row;
-    car.partsDb = parts;
-    proc.set(row.slug, car);
-  }
+  const procOf = (slug) => {
+    if (!proc.has(slug)) {
+      const row = rows.find((r) => r.slug === slug);
+      const parts = partsBySlug.get(slug);
+      const car = buildCar(slug, DESIGNS[slug], infoFor(row, parts));
+      car.info = row;
+      car.partsDb = parts;
+      proc.set(slug, car);
+    }
+    return proc.get(slug);
+  };
 
-  const manifest = await fetch('/models/manifest.json').then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
+  const manifest = await fetch(`${import.meta.env.BASE_URL}models/manifest.json`).then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
   const realSet = new Set((manifest.models || []).filter((s) => REAL_MODELS[s]));
-
-  progress(0.76, 'Photographing the garage…');
+  const firstSlug = params.get('car') && rows.some((r) => r.slug === params.get('car')) ? params.get('car') : rows[0].slug;
+  progress(0.4, `Preparing the ${rows.find((r) => r.slug === firstSlug).model}…`);
   await frame();
-  const thumbs = new Map();
+  procOf(firstSlug);
+
+  // carousel thumbnails: photos of the real models, kept in the browser after the first visit.
+  // Until a car's photo exists its card shows a neutral placeholder, never the blocky stand-in.
   const shoot = (car) => {
     const s = car.dims.L / 4.6;
     return stage.snapshot(car.root, { from: new THREE.Vector3(4.6 * s, 1.25 * s, 5.0 * s), target: new THREE.Vector3(-0.1, car.dims.H * 0.42, 0) });
   };
-  for (const car of proc.values()) thumbs.set(car.slug, shoot(car));
+  const thumbKey = (slug) => `rev-thumb-v3-${slug}`;
+  const thumbs = new Map();
+  for (const r of rows) {
+    let cached = null;
+    try { cached = realSet.has(r.slug) ? localStorage.getItem(thumbKey(r.slug)) : null; } catch { /* storage blocked */ }
+    thumbs.set(r.slug, cached || placeholderThumb(DESIGNS[r.slug].paint));
+  }
+  const keepThumb = (slug, url) => { try { localStorage.setItem(thumbKey(slug), url); } catch { /* storage full or blocked */ } };
 
   let ui;
+  let showroom; // created below; the registry callbacks only run after it exists
   const loaded = new Map();
   const registry = {
     isReal: (slug) => realSet.has(slug),
@@ -104,13 +129,19 @@ async function boot() {
       if (realSet.has(slug)) {
         say?.loading(`Loading the ${row.manufacturer} ${row.model}…`, 0);
         job = loadRealCar({
-          slug, cfg: REAL_MODELS[slug], design: DESIGNS[slug], info: infoFor(row, parts), proc: proc.get(slug),
+          slug, cfg: REAL_MODELS[slug], design: DESIGNS[slug], info: infoFor(row, parts), proc: procOf(slug),
           onProgress: (f) => say?.loading(null, f),
         }).then((car) => {
           car.info = row;
           car.partsDb = parts;
-          thumbs.set(slug, shoot(car));
-          ui?.setThumb(slug, thumbs.get(slug));
+          // photograph the car for its card only if no photo is cached; drawing it uploads all its
+          // textures, so a car that isn't on screen gives that memory straight back
+          if (thumbs.get(slug).startsWith('data:image/svg')) {
+            thumbs.set(slug, shoot(car));
+            keepThumb(slug, thumbs.get(slug));
+            ui?.setThumb(slug, thumbs.get(slug));
+            if (showroom?.car !== car) releaseGPU(car);
+          }
           say?.loading(false);
           return car;
         }).catch((err) => {
@@ -118,9 +149,16 @@ async function boot() {
           say?.loading(false);
           ui?.toast(`Couldn't load the ${row.model} model, showing the blueprint car`);
           realSet.delete(slug);
-          return proc.get(slug);
+          const fallback = procOf(slug);
+          thumbs.set(slug, shoot(fallback));
+          ui?.setThumb(slug, thumbs.get(slug));
+          return fallback;
         });
-      } else job = Promise.resolve(proc.get(slug));
+      } else {
+        const car = procOf(slug);
+        if (thumbs.get(slug).startsWith('data:image/svg')) { thumbs.set(slug, shoot(car)); ui?.setThumb(slug, thumbs.get(slug)); }
+        job = Promise.resolve(car);
+      }
       loaded.set(slug, job);
       return job;
     },
@@ -128,14 +166,13 @@ async function boot() {
 
   progress(0.9, 'Warming up shaders…');
   await frame();
-  const firstSlug = params.get('car') && proc.has(params.get('car')) ? params.get('car') : rows[0].slug;
-  const firstProc = proc.get(firstSlug);
+  const firstProc = procOf(firstSlug);
   stage.scene.add(firstProc.root);
   stage.renderer.compile(stage.scene, stage.camera);
   stage.scene.remove(firstProc.root);
 
   const audio = new EngineAudio();
-  const showroom = new Showroom(stage, registry, {
+  showroom = new Showroom(stage, registry, {
     onCar: (car) => { ui.onCar(car); atmosphere.setCar(car); },
     onArrive: (car) => audio.rev({ cyl: car.design.engine.cyl, layout: car.design.engine.layout, diesel: car.design.engine.diesel }),
     onPart: (p, car) => ui.onPart(p, car),
@@ -166,7 +203,7 @@ async function boot() {
 
   // pick up real models imported while the page is open (npm run models), no reload needed
   setInterval(async () => {
-    const m = await fetch('/models/manifest.json', { cache: 'no-store' }).then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
+    const m = await fetch(`${import.meta.env.BASE_URL}models/manifest.json`, { cache: 'no-store' }).then((r) => (r.ok ? r.json() : {})).catch(() => ({}));
     for (const slug of m.models || []) {
       if (!REAL_MODELS[slug] || realSet.has(slug)) continue;
       realSet.add(slug);
@@ -197,13 +234,17 @@ async function boot() {
     $('#loader').classList.add('out');
     setTimeout(() => $('#loader').remove(), 1000);
     document.body.classList.add('ready');
-    gsap.to(stage.camera.position, { x: 7.0, y: 1.7, z: 7.4, duration: 3.2, ease: 'power3.inOut' });
+    const home = homeView(stage.camera);
+    gsap.to(stage.camera.position, { x: home.pos.x, y: home.pos.y, z: home.pos.z, duration: 3.2, ease: 'power3.inOut' });
+    gsap.to(stage.controls.target, { x: home.target.x, y: home.target.y, z: home.target.z, duration: 3.2, ease: 'power3.inOut' });
+    gsap.to(stage.shift, { px: home.shift, duration: 3.2, ease: 'power3.inOut', onUpdate: stage.applyShift });
     showroom.showCar(firstSlug).then(() => {
-      // quietly preload the other real models and the other locations
-      const queue = rows.map((r) => r.slug).filter((s) => realSet.has(s) && s !== firstSlug);
+      // quietly preload the other real models (their photos replace the placeholder cards) and
+      // the other locations
+      const queue = rows.map((r) => r.slug).filter((s) => s !== firstSlug);
       const next = () => {
         const s = queue.shift();
-        if (s) setTimeout(() => registry.get(s, { silent: true }).then(next), 2500);
+        if (s) setTimeout(() => registry.get(s, { silent: true }).then(next), 1200);
         else SCENES.forEach((sc) => atmosphere.preload(sc.id));
       };
       next();

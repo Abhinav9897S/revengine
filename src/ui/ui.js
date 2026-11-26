@@ -1,5 +1,5 @@
 // All HUD / overlay DOM logic.
-import { listCars, distinct, compareCars, maxStats, runConsole, resetDatabase, credits } from '../db/db.js';
+import { listCars, distinct, compareCars, maxStats, runConsole, resetDatabase, credits, getAllCars } from '../db/db.js';
 
 const $ = (s) => document.querySelector(s);
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
@@ -19,9 +19,24 @@ const PART_ORDER = [
 
 export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scenes, switchScene }) {
   const order = rows.map((r) => r.slug);
-  const max = maxStats();
+  let max = maxStats();
+
+  // phones: the top bar wraps onto extra rows; publish its real height so the car info and the
+  // full-page views start below it instead of underneath the tabs
+  const topbar = $('#topbar');
+  const publishTop = () => document.documentElement.style.setProperty('--topbar-h', `${Math.round(topbar.getBoundingClientRect().bottom)}px`);
+  new ResizeObserver(publishTop).observe(topbar);
+  publishTop();
   let view = 'showroom';
   let current = null;
+
+  // re-read every car from the database (after a SQL Lab write or a reset), so the showroom
+  // shows the same numbers as the Garage and Compare pages
+  function refreshData() {
+    getAllCars().forEach((f) => { const r = rows.find((x) => x.slug === f.slug); if (r) Object.assign(r, f); });
+    max = maxStats();
+    if (current) onCar(current);
+  }
 
   // ---------------- carousel ----------------
   const cardsEl = $('#cards');
@@ -47,12 +62,6 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
   }
 
   // ---------------- car info ----------------
-  function stat(label, value, unit, frac, peak) {
-    const on = Math.max(1, Math.min(20, Math.round(frac * 20)));
-    const segs = Array.from({ length: 20 }, (_, i) => `<i data-c="${i < on ? (peak && i === on - 1 ? 'on peak' : 'on') : ''}" style="transition-delay:${i * 22}ms"></i>`).join('');
-    return `<div class="stat"><label>${label}</label><div class="meter">${segs}</div><b>${value}<small>${unit}</small></b></div>`;
-  }
-
   function onCar(car) {
     current = car;
     const r = car.info;
@@ -61,22 +70,18 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
     model.textContent = r.model;
     model.classList.remove('swap'); void model.offsetWidth; model.classList.add('swap');
     $('#ci-tagline').textContent = r.tagline;
+    // one quiet spec line and three headline figures (the full sheet lives in Garage and Compare)
     const disp = r.displacement_l ? `${r.displacement_l} L ` : '';
-    $('#ci-chips').innerHTML = [r.year, `${disp}${r.engine_layout}`, r.aspiration, r.drivetrain, `${r.engine_position === 'floor' ? 'Floor battery' : `${r.engine_position}-engine`}`, r.color_name]
-      .map((c) => `<span>${esc(c)}</span>`).join('')
-      + (car.real ? '' : '<span class="draft-chip">Draft model · real 3D model not downloaded yet</span>');
-    const statsEl = $('#ci-stats');
-    statsEl.innerHTML = [
-      stat('Power', fmt(r.power_hp), 'hp', r.power_hp / max.power, r.power_hp === max.power),
-      stat('Torque', fmt(r.torque_nm), 'Nm', r.torque_nm / max.torque, r.torque_nm === max.torque),
-      stat('Top speed', r.top_speed_kmh, 'km/h', r.top_speed_kmh / max.speed, r.top_speed_kmh === max.speed),
-      stat('0-100', r.zero_100_s.toFixed(1), 's', 1 - (r.zero_100_s - 1.6) / (max.accel_worst - 1.2), r.zero_100_s === max.accel_best),
-      stat('hp / tonne', r.hp_per_tonne, '', r.hp_per_tonne / max.ratio, r.hp_per_tonne === max.ratio),
+    $('#ci-chips').innerHTML = esc([r.year, `${disp}${r.engine_layout}`, r.drivetrain, r.color_name].filter(Boolean).join(' · '))
+      + (car.real ? '' : '<span class="draft-chip">Draft model</span>');
+    const fig = (v, unit) => `<div><b>${v}</b><small>${unit}</small></div>`;
+    $('#ci-stats').innerHTML = [
+      fig(fmt(r.power_hp), 'hp'),
+      fig(Number(r.zero_100_s).toFixed(1), 's 0–100'),
+      fig(r.top_speed_kmh, 'km/h top'),
     ].join('');
-    requestAnimationFrame(() => requestAnimationFrame(() => {
-      statsEl.querySelectorAll('.meter i').forEach((i) => { i.className = i.dataset.c; });
-    }));
     $('#ci-price').textContent = `$${fmt(r.price_usd)}`;
+    $('#btn-engine').hidden = !car.parts.has('engine');
     document.querySelectorAll('.card').forEach((c) => c.classList.toggle('on', c.dataset.slug === car.slug));
     document.querySelector('.card.on')?.scrollIntoView({ behavior: 'smooth', inline: 'center', block: 'nearest' });
 
@@ -136,9 +141,9 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
   }
 
   // ---------------- toolbar ----------------
-  $('#btn-xray').onclick = () => { showroom.toggleXray(); };
+  // car-panel actions (X-ray, reset and the rest stay on the keyboard: X, R, Esc)
+  $('#btn-engine').onclick = () => { audio.blip(520); showroom.activate('engine'); };
   $('#btn-explode').onclick = () => { audio.whoosh(); showroom.explodeAll(); };
-  $('#btn-reset').onclick = () => showroom.reset();
   const soundBtn = $('#btn-sound');
   soundBtn.onclick = () => {
     audio.unlock();
@@ -147,7 +152,7 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
     toast(audio.enabled ? 'Sound on' : 'Sound off');
   };
   function onXray(on) {
-    $('#btn-xray').classList.toggle('on', on);
+    $('#btn-engine').classList.toggle('on', on && showroom.active === 'engine');
     if (on) audio.whoosh();
   }
 
@@ -167,6 +172,7 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
     ['garage', 'compare', 'sqllab'].forEach((id) => { $(`#${id}`).hidden = id !== v; });
     document.body.classList.toggle('view-overlay', v !== 'showroom');
     showroom.stage.controls.enabled = v === 'showroom';
+    showroom.stage.setIdle(v !== 'showroom');
     if (v === 'garage') renderGarage();
     if (v === 'compare') renderCompare();
     if (v === 'sqllab' && !$('#lab-input').value) { $('#lab-input').value = PRESETS[0][1]; runLab(); }
@@ -250,7 +256,9 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
         <div class="cmp-side b ${bw ? 'win' : ''}"><div class="bar"><i style="width:${(vb / m) * 100}%"></i></div><b>${show(vb)}</b></div>
       </div>`;
     }).join('');
-    $('#cmp-body').innerHTML = `<div class="cmp-heads"><h3>${esc(A.model)}</h3><div class="score">${sa} : ${sb}</div><h3>${esc(B.model)}</h3></div>${rowsHtml}`;
+    // the two cars face each other above the head-to-head
+    const photos = `<div class="cmp-photos"><img data-slug="${A.slug}" src="${thumbs.get(A.slug)}" alt="${esc(A.model)}" /><span></span><img data-slug="${B.slug}" src="${thumbs.get(B.slug)}" alt="${esc(B.model)}" /></div>`;
+    $('#cmp-body').innerHTML = `${photos}<div class="cmp-heads"><h3>${esc(A.model)}</h3><div class="score">${sa} : ${sb}</div><h3>${esc(B.model)}</h3></div>${rowsHtml}`;
     $('#cmp-sql').innerHTML = `${highlight(res.sql)}\n<span class="meta">-- ${res.ms.toFixed(2)} ms</span>`;
   }
 
@@ -268,16 +276,25 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
   $('#lab-presets').onclick = (e) => {
     const b = e.target.closest('button');
     if (!b) return;
-    $('#lab-input').value = PRESETS[+b.dataset.i][1];
-    runLab();
+    const sql = PRESETS[+b.dataset.i][1];
+    $('#lab-input').value = sql;
+    // read-only examples run straight away; one that changes data waits for "Run query",
+    // so loading it and then pressing Run doesn't apply the change twice
+    if (/^\s*(select|with|pragma)\b/i.test(sql)) runLab();
+    else {
+      $('#lab-meta').textContent = 'loaded · press Run to apply';
+      $('#lab-out').innerHTML = '<div class="err" style="color:var(--ink-2)">This example changes data. Press Run query (Ctrl+Enter) to apply it; Reset database undoes it.</div>';
+    }
   };
   $('#lab-run').onclick = runLab;
   $('#lab-input').addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) { e.preventDefault(); runLab(); } e.stopPropagation(); });
-  $('#lab-reset').onclick = async () => { await resetDatabase(); toast('Database reset to seed data'); runLab(); };
+  $('#lab-reset').onclick = async () => { await resetDatabase(); toast('Database reset to seed data'); runLab(); refreshData(); };
   function runLab() {
     const sql = $('#lab-input').value;
     try {
       const r = runConsole(sql);
+      // a write changes what the showroom shows: re-read the cars so every number stays live
+      if (/\b(update|insert|delete|replace|drop|alter|create)\b/i.test(sql)) refreshData();
       $('#lab-meta').textContent = `${r.rows.length} row${r.rows.length === 1 ? '' : 's'} · ${r.ms.toFixed(2)} ms`;
       $('#lab-out').innerHTML = r.columns.length
         ? `<table><thead><tr>${r.columns.map((c) => `<th>${esc(c)}</th>`).join('')}</tr></thead><tbody>${r.rows.map((row) => `<tr>${r.columns.map((c) => `<td>${esc(row[c] ?? 'NULL')}</td>`).join('')}</tr>`).join('')}</tbody></table>`
@@ -292,7 +309,14 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
   window.addEventListener('keydown', (e) => {
     if (e.target.matches('input, textarea, select')) return;
     const k = e.key.toLowerCase();
-    if (k === 'escape') { if (cinema.on) cinema.stop(); else if (view !== 'showroom') setView('showroom'); else showroom.reset(); return; }
+    if (k === 'escape') {
+      if (!$('#credits').hidden) showCredits(false);
+      else if (cinema.on) cinema.stop();
+      else if (view !== 'showroom') setView('showroom');
+      else showroom.reset();
+      return;
+    }
+    if (!$('#credits').hidden) return;
     if (k === 'c' && view === 'showroom') { cinema.toggle(); return; }
     if (k === 'l') { $('#btn-loc').click(); return; }
     if (cinema.on) return;
@@ -340,11 +364,12 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
     document.querySelectorAll(`.card[data-slug="${slug}"] em.draft`).forEach((em) => { em.className = 'real'; em.textContent = '3D'; });
   }
   function setThumb(slug, url) {
-    document.querySelectorAll(`.card[data-slug="${slug}"] img, .gcard[data-slug="${slug}"] img`).forEach((img) => { img.src = url; });
+    document.querySelectorAll(`.card[data-slug="${slug}"] img, .gcard[data-slug="${slug}"] img, .cmp-photos img[data-slug="${slug}"]`).forEach((img) => { img.src = url; });
   }
 
   // ---------------- ad mode ----------------
   $('#btn-ad').onclick = () => cinema.toggle();
+  $('#ad-exit').onclick = () => cinema.stop();
   function cinemaUI(on) {
     $('#btn-ad').classList.toggle('on', on);
     if (!on) $('#adcard').className = '';
@@ -364,9 +389,16 @@ export function createUI({ rows, thumbs, registry, showroom, audio, cinema, scen
     $('#credits-list').innerHTML = res.rows.map((c) => `
       <tr><td>${esc(c.kind)}</td><td><a href="${esc(c.url)}" target="_blank" rel="noopener">${esc(c.title)}</a>${c.car ? `<small>${esc(c.car)}</small>` : ''}</td><td>${esc(c.author)}</td><td>${esc(c.license)}</td></tr>`).join('');
     $('#credits-sql').innerHTML = highlight(res.sql);
-    $('#credits').hidden = false;
+    showCredits(true);
   };
-  $('#credits-close').onclick = () => { $('#credits').hidden = true; };
+  $('#credits-close').onclick = () => showCredits(false);
+  // credits sit over every view: hide the showroom HUD under them like the other pages do
+  function showCredits(on) {
+    $('#credits').hidden = !on;
+    document.body.classList.toggle('view-overlay', on || view !== 'showroom');
+    showroom.stage.controls.enabled = !on && view === 'showroom';
+    showroom.stage.setIdle(on || view !== 'showroom');
+  }
 
   return { onCar, onPart: (p, car) => showPartInfo(p, car), onPiece, onHover, onXray, toast, onScene, loading, setThumb, markReal, adCut, cinema: cinemaUI };
 }

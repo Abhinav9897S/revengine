@@ -26,6 +26,10 @@ export class Showroom {
     this.pointerDirty = false;
     this.idleTimer = 0;
     this.autoSpin = true;
+    // soft key light that follows the camera while the car is opened up (X-ray / exploded),
+    // so engine metal still reads in the dark night locations
+    this.inspect = new THREE.SpotLight('#fff6ea', 0, 0, 0.5, 1, 0);
+    stage.scene.add(this.inspect, this.inspect.target);
 
     const el = stage.renderer.domElement;
     el.addEventListener('pointermove', (e) => this.onMove(e));
@@ -48,9 +52,10 @@ export class Showroom {
     const scene = this.stage.scene;
     this.car = next;
     this.hooks.onCar?.(next);
+    // the car that leaves gives its video memory back (it re-uploads if it comes back)
     if (old && !instant) {
-      this.drive(old, 16, 1.0, 'power2.in').then(() => scene.remove(old.root));
-    } else if (old) scene.remove(old.root);
+      this.drive(old, 16, 1.0, 'power2.in').then(() => { scene.remove(old.root); if (this.car !== old) releaseGPU(old); });
+    } else if (old) { scene.remove(old.root); releaseGPU(old); }
     next.root.position.set(instant ? 0 : -16, 0, 0);
     scene.add(next.root);
     this.flash(next);
@@ -104,6 +109,8 @@ export class Showroom {
       let label = o.userData.hover;
       const byGroup = o.userData.pickByGroup;
       if (byGroup && h.face && byGroup[h.face.materialIndex]) [partId, label] = byGroup[h.face.materialIndex];
+      const zone = o.userData.zone?.(h); // e.g. the bonnet area of a one-piece body
+      if (zone) [partId, label] = zone;
       if (!partId) continue;
       // when a part is open, prefer its individual pieces
       if (this.active === partId || this.exploded) {
@@ -124,6 +131,8 @@ export class Showroom {
     const outline = this.stage.outline;
     if (!h) outline.selectedObjects = [];
     else if (h.piece) outline.selectedObjects = [h.piece.obj];
+    // the bare body: no outline round the whole car, the tooltip and cursor are enough
+    else if (h.partId === 'chassis' && !this.active && !this.exploded) outline.selectedObjects = [];
     else outline.selectedObjects = this.partMeshes(h.partId);
     this.stage.renderer.domElement.style.cursor = h ? 'pointer' : 'grab';
     this.hooks.onHover?.(h);
@@ -172,7 +181,7 @@ export class Showroom {
     this.idleTimer = 0;
     this.hooks.onPart?.(part, car);
     this.setXray(part.xray);
-    this.stage.setDof(true, { auto: true, aperture: 0.0022 });
+    // (no depth of field here: it redraws the whole scene every frame; Ad mode keeps it)
     const hasMoves = part.moves.length > 0;
     this.focus(part.focus, 1.3);
     this.runMoves(part, true, 0.95);
@@ -252,12 +261,14 @@ export class Showroom {
   focus(f, duration = 1.2) {
     const { camera, controls } = this.stage;
     const wide = window.innerWidth > 820;
-    gsap.to(this.stage.shift, { px: f && wide ? 150 : 0, duration, ease: 'power3.inOut', onUpdate: this.stage.applyShift, overwrite: 'auto' });
+    const home = homeView(camera);
+    gsap.to(this.stage.shift, { px: f ? (wide ? 150 : 0) : home.shift, duration, ease: 'power3.inOut', onUpdate: this.stage.applyShift, overwrite: 'auto' });
+    const fit = viewFit(camera);
     let pos, target;
-    if (!f) { pos = DEFAULT_VIEW.pos.clone(); target = DEFAULT_VIEW.target.clone(); }
+    if (!f) ({ pos, target } = home);
     else {
       target = this.car.root.localToWorld(f.target.clone());
-      pos = target.clone().add(f.dir.clone().normalize().multiplyScalar(f.dist));
+      pos = target.clone().add(f.dir.clone().normalize().multiplyScalar(f.dist * fit));
       pos.y = Math.max(pos.y, 0.25);
     }
     gsap.to(camera.position, { x: pos.x, y: pos.y, z: pos.z, duration, ease: 'power3.inOut', overwrite: 'auto' });
@@ -282,6 +293,8 @@ export class Showroom {
       });
     }
     const u = this.ghost.uniforms;
+    this.stage.shadowsDirty = 3; // the body stops (or starts) casting shadows
+    gsap.to(this.inspect, { intensity: on ? 2.6 : 0, duration: 0.6, overwrite: 'auto' });
     car.internals?.forEach((g) => { g.visible = on; });
     if (on) {
       car.exterior.forEach((m) => { m.userData.mat = m.material; m.material = HIDDEN; m.castShadow = false; });
@@ -312,6 +325,7 @@ export class Showroom {
     const partCenter = all.getCenter(new THREE.Vector3());
     const camRight = new THREE.Vector3().setFromMatrixColumn(this.stage.camera.matrixWorld, 0);
     this._labels = [];
+    const placed = [];
     part.pieces.filter((p) => p.label).forEach((p, i) => {
       tmpBox.setFromObject(p.obj);
       const c = tmpBox.getCenter(new THREE.Vector3());
@@ -320,6 +334,9 @@ export class Showroom {
       out.normalize();
       const side = Math.sign(out.dot(camRight)) || 1;
       const anchor = c.clone().addScaledVector(out, 0.22).add(new THREE.Vector3(0, 0.1 + (i % 2) * 0.06, 0)).addScaledVector(camRight, side * 0.12);
+      // pieces that share a centre (tyre and rim) would stack their labels: lift until clear
+      for (let k = 0; k < 8 && placed.some((q) => q.distanceTo(anchor) < 0.13); k++) anchor.y += 0.13;
+      placed.push(anchor.clone());
       const lc = p.obj.worldToLocal(c.clone());
       const la = p.obj.worldToLocal(anchor.clone());
       const line = new THREE.Line(new THREE.BufferGeometry().setFromPoints([lc, la]), lineMat);
@@ -360,6 +377,11 @@ export class Showroom {
     }
     this.idleTimer += dt;
     const c = this.stage.controls;
+    if (this.inspect.intensity > 0) {
+      const cam = this.stage.camera.position;
+      this.inspect.position.set(cam.x, cam.y + 1.2, cam.z).lerp(c.target, -0.15);
+      this.inspect.target.position.copy(c.target);
+    }
     if (this.autoSpin && !this.active && !this.exploded && this.idleTimer > 4 && !c.autoRotate) c.autoRotate = true;
   }
 }
@@ -372,6 +394,41 @@ function findPiece(part, obj) {
     o = o.parent;
   }
   return null;
+}
+
+// Free a car's textures and vertex buffers on the GPU. Three.js uploads them again by itself
+// the next time the car is drawn; the images and geometry stay in memory.
+export function releaseGPU(car) {
+  const seen = new Set();
+  car.root.traverse((o) => {
+    if (o.geometry && !seen.has(o.geometry)) { seen.add(o.geometry); o.geometry.dispose(); }
+    (Array.isArray(o.material) ? o.material : [o.material]).forEach((m) => {
+      if (!m) return;
+      for (const k in m) {
+        const t = m[k];
+        if (t && t.isTexture && !seen.has(t)) { seen.add(t); t.dispose(); }
+      }
+    });
+  });
+}
+
+// Camera distances are tuned for a 16:9 window; a narrower one sees less to the sides, so back
+// off until the car (or the exploded parts and their labels) fit between the HUD panels again.
+export function viewFit(camera) {
+  return Math.min(2.2, Math.max(1, 1.75 / camera.aspect));
+}
+
+// The resting camera. The car panel sits top-left, so on desktop the view is shifted right
+// (shift = horizontal view offset in px; negative moves the picture right) and, on shorter
+// screens, aimed a little lower and closer: the car fills the free space beside and below
+// the panel, above the car strip.
+export function homeView(camera) {
+  const wide = window.innerWidth > 820;
+  const short = window.innerHeight < 900;
+  const target = new THREE.Vector3(0, short ? 0.8 : DEFAULT_VIEW.target.y, 0);
+  const pos = DEFAULT_VIEW.pos.clone().sub(DEFAULT_VIEW.target).multiplyScalar(viewFit(camera) * (short ? 0.92 : 1)).add(target);
+  const shift = wide ? -Math.round(window.innerWidth * (short ? 0.16 : 0.12)) : 0;
+  return { pos, target, shift };
 }
 
 function isShown(o) {

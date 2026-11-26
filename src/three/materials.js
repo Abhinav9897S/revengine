@@ -1,9 +1,26 @@
 import * as THREE from 'three';
+import { TEX, rep } from './textures.js';
 
 const cache = new Map();
 function once(key, make) {
   if (!cache.has(key)) cache.set(key, make());
   return cache.get(key);
+}
+const V2 = (s) => new THREE.Vector2(s, s);
+const phys = (o) => new THREE.MeshPhysicalMaterial(o);
+
+// Real-world finishes for the mechanical parts (engine, chassis, battery): every metal gets a
+// surface (cast grain, machining streaks, weave...) so it reads as a photographed part.
+export function crinkle(color) {
+  return once(`crinkle${color}`, () => phys({
+    color, metalness: 0.15, roughness: 0.55, normalMap: rep(TEX.crinkleNormal(), 3), normalScale: V2(0.7),
+    clearcoat: 0.35, clearcoatRoughness: 0.45,
+  }));
+}
+export function anodized(color) {
+  return once(`anod${color}`, () => phys({
+    color, metalness: 0.85, roughness: 0.6, roughnessMap: rep(TEX.brushedRough(), 2), normalMap: rep(TEX.brushedNormal(), 2), normalScale: V2(0.2),
+  }));
 }
 
 export function paint(color) {
@@ -40,28 +57,89 @@ export const M = {
     }));
   },
   get inner() { return once('inner', () => new THREE.MeshStandardMaterial({ color: 0x050506, roughness: 0.9, side: THREE.BackSide })); },
-  get black() { return solid('#0a0a0b', 0.1, 0.6); },
+  // satin black powder coat (frames, trim, brackets)
+  get black() { return once('black', () => phys({ color: '#0c0c0e', metalness: 0.2, roughness: 0.5, normalMap: rep(TEX.castNormal(), 3), normalScale: V2(0.12) })); },
   get gloss() { return solid('#060607', 0.3, 0.15); },
-  get rubber() { return solid('#121214', 0.0, 0.85); },
+  get rubber() { return once('rubber', () => phys({ color: '#141416', metalness: 0, roughness: 0.88, normalMap: rep(TEX.castNormal(), 5), normalScale: V2(0.3) })); },
   get chrome() { return solid('#ffffff', 1.0, 0.08); },
-  get alloy() { return solid('#c7cbd1', 1.0, 0.28); },
-  get darkAlloy() { return solid('#3b3f46', 0.9, 0.35); },
-  get steel() { return solid('#8d939b', 0.95, 0.38); },
-  get titanium() { return solid('#8f8aa8', 1.0, 0.25); },
-  get carbon() { return once('carbon', () => new THREE.MeshPhysicalMaterial({ color: 0x1a1c20, metalness: 0.4, roughness: 0.35, clearcoat: 1, clearcoatRoughness: 0.08 })); },
+  // cast aluminium (heads, intake, housings): bright, grainy, satin
+  get alloy() {
+    return once('alloy', () => phys({
+      color: '#c9ccd1', metalness: 1, roughness: 0.55, roughnessMap: rep(TEX.castRough(), 3),
+      normalMap: rep(TEX.castNormal(), 4), normalScale: V2(0.22),
+    }));
+  },
+  // darker cast aluminium / magnesium (block, sump, gearbox case)
+  get darkAlloy() {
+    return once('darkAlloy', () => phys({
+      color: '#7a7f87', metalness: 1, roughness: 0.62, roughnessMap: rep(TEX.castRough(), 3),
+      normalMap: rep(TEX.castNormal(), 5), normalScale: V2(0.3),
+    }));
+  },
+  // cast iron (turbine housings, exhaust flanges)
+  get castIron() {
+    return once('castIron', () => phys({
+      color: '#4d5056', metalness: 0.9, roughness: 0.85, roughnessMap: rep(TEX.castRough(), 3),
+      normalMap: rep(TEX.castNormal(), 3), normalScale: V2(1.2),
+    }));
+  },
+  // machined steel (crankshaft, rods, discs): streaky, polished
+  get steel() {
+    return once('steel', () => phys({
+      color: '#b9bfc7', metalness: 1, roughness: 0.42, roughnessMap: rep(TEX.brushedRough(), 1, 3),
+      normalMap: rep(TEX.brushedNormal(), 1, 3), normalScale: V2(0.25),
+    }));
+  },
+  // brushed titanium (tailpipe tips, exhaust system)
+  get titanium() {
+    return once('titanium', () => phys({
+      color: '#a7a4b4', metalness: 1, roughness: 0.28, roughnessMap: rep(TEX.brushedRough(), 1, 2),
+      normalMap: rep(TEX.brushedNormal(), 1, 2), normalScale: V2(0.15),
+    }));
+  },
+  // exhaust headers: heat tint along each tube, blue-grey at the hot head end fading to gold and silver
+  get headers() {
+    return once('headers', () => phys({
+      color: '#ffffff', map: rep(TEX.heatColor(), -1, 1), metalness: 1, roughness: 0.3,
+      normalMap: rep(TEX.brushedNormal(), 4, 1), normalScale: V2(0.12),
+    }));
+  },
+  // twill carbon fibre under clear coat
+  get carbon() {
+    return once('carbon', () => phys({
+      color: '#ffffff', map: rep(TEX.carbonColor(), 3), metalness: 0.25, roughness: 0.32,
+      normalMap: rep(TEX.carbonNormal(), 3), normalScale: V2(0.5), clearcoat: 1, clearcoatRoughness: 0.04,
+    }));
+  },
   get leather() { return solid('#1b1716', 0.0, 0.7); },
   get alcantara() { return solid('#232326', 0.0, 0.95); },
   get mesh() { return solid('#0c0c0d', 0.5, 0.55); },
-  get disc() { return solid('#7e8288', 0.9, 0.45); },
+  get disc() {
+    return once('disc', () => phys({
+      color: '#8b8f95', metalness: 1, roughness: 0.5, roughnessMap: rep(TEX.brushedRough(), 2),
+      normalMap: rep(TEX.brushedNormal(), 2), normalScale: V2(0.3),
+    }));
+  },
   get mirror() { return solid('#dfe6ee', 1.0, 0.02); },
   get screen() { return glow('#38bdf8', 1.6); },
   get headLed() { return glow('#e9f4ff', 3.2); },
   get tailLed() { return glow('#ff1028', 3.2); },
-  get hot() { return glow('#ff5a1a', 2.2); },
-  get cell() { return glow('#22d3ee', 1.4); },
-  get hv() { return solid('#ff7a00', 0.1, 0.5); },
-  get copper() { return solid('#c27c4e', 1.0, 0.3); },
-  get radiator() { return solid('#24272c', 0.8, 0.55); },
+  get hot() { return glow('#ff5a1a', 1.2); },
+  get cell() { return glow('#22d3ee', 0.8); },
+  // orange high-voltage cable in corrugated sleeve
+  get hv() { return once('hv', () => phys({ color: '#ff6a10', metalness: 0, roughness: 0.5, normalMap: rep(TEX.ribsNormal(), 6, 1), normalScale: V2(0.8) })); },
+  get copper() {
+    return once('copper', () => phys({
+      color: '#c0703f', metalness: 1, roughness: 0.32, roughnessMap: rep(TEX.brushedRough(), 2), normalMap: rep(TEX.brushedNormal(), 2), normalScale: V2(0.2),
+    }));
+  },
+  get radiator() { return once('radiator', () => phys({ color: '#2d3035', metalness: 0.85, roughness: 0.45, normalMap: TEX.finsNormal(), normalScale: V2(1) })); },
+  // fasteners, black plastics, hoses, battery cells
+  get bolt() { return once('bolt', () => phys({ color: '#b3b8be', metalness: 1, roughness: 0.3 })); },
+  get plastic() { return once('plastic', () => phys({ color: '#141416', metalness: 0, roughness: 0.55, normalMap: rep(TEX.castNormal(), 4), normalScale: V2(0.1) })); },
+  get hose() { return once('hose', () => phys({ color: '#18181b', metalness: 0, roughness: 0.75, normalMap: rep(TEX.ribsNormal(), 8, 1), normalScale: V2(0.25) })); },
+  get belt() { return once('belt', () => phys({ color: '#121214', metalness: 0, roughness: 0.8, normalMap: rep(TEX.ribsNormal(), 1, 40), normalScale: V2(0.6) })); },
+  get cells() { return once('cells', () => phys({ color: '#ffffff', map: TEX.cellsColor(), metalness: 0.6, roughness: 0.4 })); },
 };
 
 // ---------- X-ray ghost shader ----------

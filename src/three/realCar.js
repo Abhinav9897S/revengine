@@ -4,6 +4,7 @@
 import * as THREE from 'three';
 import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 import { MeshoptDecoder } from 'three/addons/libs/meshopt_decoder.module.js';
+import { mergeGeometries } from 'three/addons/utils/BufferGeometryUtils.js';
 
 const loader = new GLTFLoader();
 loader.setMeshoptDecoder(MeshoptDecoder);
@@ -29,9 +30,32 @@ const RX = {
   rim: /rim|wheel|llanta|felge|spoke|rueda/i,
   mirror: /mirror|espejo|retrov|spiegel/i,
   chrome: /chrome|cromo|chrom|polish/i,
-  paint: /paint|carpaint|car_paint|\bbody|coat|exterior|carroc|\black\b|lacquer/i,
+  paint: /paint|lacquer|carrosserie|carroc|\black(ier)?\b|body.?colou?r/i,
+  // never the main paint, whatever its area
+  notPaint: /carbon|cf_|_cf\b|glass|window|plastic|rubber|tyre|tire|chrome|grille|badge|plate|interior|leather|alcantara|light|lamp|engine|calip|brake|wheel|\brims?\b|chassis|base_material/i,
   carbon: /carbon|cf_|_cf\b/i,
 };
+
+// Copy a geometry with plain float attributes (quantised glTF data can't be transformed or merged as is)
+const comp = (attr, i, c) => (c === 0 ? attr.getX(i) : c === 1 ? attr.getY(i) : c === 2 ? attr.getZ(i) : attr.getW(i));
+function floatGeometry(g, matrix) {
+  const ng = new THREE.BufferGeometry();
+  const n = g.attributes.position.count;
+  for (const [name, attr] of Object.entries(g.attributes)) {
+    const size = attr.itemSize;
+    const arr = new Float32Array(n * size);
+    for (let k = 0; k < n; k++) for (let c = 0; c < size; c++) arr[k * size + c] = comp(attr, k, c);
+    ng.setAttribute(name, new THREE.BufferAttribute(arr, size));
+  }
+  const idx = [];
+  if (g.index) for (let i = 0; i < g.index.count; i++) idx.push(g.index.getX(i));
+  else for (let i = 0; i < n; i++) idx.push(i);
+  // a mirrored piece (negative scale) is drawn flipped by three.js; once baked, flip its triangles instead
+  if (matrix && matrix.determinant() < 0) for (let i = 0; i < idx.length; i += 3) { const t = idx[i + 1]; idx[i + 1] = idx[i + 2]; idx[i + 2] = t; }
+  ng.setIndex(idx);
+  if (matrix) ng.applyMatrix4(matrix);
+  return ng;
+}
 
 let flakeTex = null;
 function flakes() {
@@ -119,7 +143,7 @@ function textOf(o, stop) {
 }
 
 // Split one mesh into several by where each triangle sits (in car space).
-// keyOf(x, z) returns the bucket name for a triangle centre.
+// keyOf(x, z, y, a, b, c) returns the bucket name for a triangle (centre x/y/z, corners a/b/c).
 function splitMesh(mesh, keyOf) {
   const g = mesh.geometry;
   if (Array.isArray(mesh.material)) return [mesh];
@@ -136,10 +160,11 @@ function splitMesh(mesh, keyOf) {
     a.fromBufferAttribute(pos, i0).applyMatrix4(m);
     b.fromBufferAttribute(pos, i1).applyMatrix4(m);
     c.fromBufferAttribute(pos, i2).applyMatrix4(m);
-    const key = keyOf((a.x + b.x + c.x) / 3, (a.z + b.z + c.z) / 3);
+    const key = keyOf((a.x + b.x + c.x) / 3, (a.z + b.z + c.z) / 3, (a.y + b.y + c.y) / 3, a, b, c);
     (buckets[key] || (buckets[key] = [])).push(i0, i1, i2);
   }
-  const comp = (attr, i, c) => (c === 0 ? attr.getX(i) : c === 1 ? attr.getY(i) : c === 2 ? attr.getZ(i) : attr.getW(i));
+  const keys = Object.keys(buckets);
+  if (keys.length === 1) { mesh.userData.splitKey = keys[0]; return [mesh]; } // nothing to cut
   const out = [];
   for (const [key, idx] of Object.entries(buckets)) {
     if (!idx.length) continue;
@@ -162,6 +187,7 @@ function splitMesh(mesh, keyOf) {
     ng.computeBoundingSphere();
     const nm = new THREE.Mesh(ng, mesh.material);
     nm.name = `${mesh.name}_${key}`;
+    nm.userData.splitKey = key;
     nm.position.copy(mesh.position);
     nm.quaternion.copy(mesh.quaternion);
     nm.scale.copy(mesh.scale);
@@ -182,7 +208,7 @@ const boxOf = (o) => new THREE.Box3().setFromObject(o);
 export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, url }) {
   // per-model name patterns (src/data/realModels.js `rx`) override the built-in ones
   const R = { ...RX, ...(cfg.rx || {}) };
-  const gltf = await loader.loadAsync(url || `/models/${slug}.glb`, (e) => onProgress?.(e.total ? e.loaded / e.total : 0));
+  const gltf = await loader.loadAsync(url || `${import.meta.env.BASE_URL}models/${slug}.glb`, (e) => onProgress?.(e.total ? e.loaded / e.total : 0));
   const model = gltf.scene;
   const root = new THREE.Group();
   root.name = slug;
@@ -257,6 +283,9 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
 
   // ---------------- classify meshes
   const cat = new Map();
+  const matsOf = (m) => (Array.isArray(m.material) ? m.material : [m.material]).filter(Boolean);
+  // red see-through "glass" is a tail-light lens
+  const redLens = (m, t) => /red.?glass/i.test(t) || matsOf(m).some((mt) => mt.color && mt.color.r > 0.12 && mt.color.r > 5 * mt.color.g && mt.color.r > 5 * mt.color.b);
   const classify = (m) => {
     const t = textOf(m, model);
     if (R.steer.test(t)) return 'interior';
@@ -267,47 +296,106 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
     if (R.exhaust.test(t)) return 'exhaust';
     if (R.wing.test(t)) return 'wing';
     if (R.wheel.test(t) && !R.wheelEx.test(t)) return 'wheel';
-    if (R.glass.test(t)) return 'glass';
+    if (R.glass.test(t)) return redLens(m, t) ? 'light' : 'glass';
     if (R.interior.test(t)) return 'interior';
     return 'body';
   };
   meshes.forEach((m) => cat.set(m, classify(m)));
+  // swap a mesh for the pieces it was split into; c is a category or (piece) => category
+  const replace = (m, parts, c) => {
+    cat.delete(m);
+    parts.forEach((p) => cat.set(p, typeof c === 'function' ? c(p) : c));
+    meshes.splice(meshes.indexOf(m), 1, ...parts);
+  };
 
-  // geometric fallback for wheels when names don't say "wheel"
-  const wheelCount = [...cat.values()].filter((c) => c === 'wheel').length;
-  if (wheelCount < 4) {
+  // ---------------- wheels by geometry. Only the tyres touch the ground, so their contact patches
+  // give each wheel's position; the wheel is the tyre-radius cylinder around that axle.
+  const cyl = {};
+  {
+    const pts = { fr: [], fl: [], rr: [], rl: [] };
+    const v = V3();
+    const yMax = 0.012 * H + 0.006;
     meshes.forEach((m) => {
-      if (cat.get(m) !== 'body') return;
-      const b = boxOf(m), s = b.getSize(V3()), c = b.getCenter(V3());
-      const round = Math.abs(s.x - s.y) < 0.25 * Math.max(s.x, s.y) && s.y > 0.35 && s.y < 1.1;
-      const corner = Math.abs(c.x) > 0.18 * L && Math.abs(c.z) > 0.2 * W && c.y < 0.65;
-      const spans = s.x > 0.5 * L || s.z > 0.6 * W;
-      if ((round && corner) || (spans && /rubber|tire|tyre|rim|wheel|black/i.test(textOf(m, model)) && c.y < 0.6)) cat.set(m, 'wheel');
+      if (boxOf(m).min.y > yMax) return;
+      const pos = m.geometry.attributes.position;
+      for (let i = 0; i < pos.count; i++) {
+        v.fromBufferAttribute(pos, i).applyMatrix4(m.matrixWorld);
+        if (v.y <= yMax && Math.abs(v.x) > 0.15 * L && Math.abs(v.z) > 0.15 * W) pts[(v.x > 0 ? 'f' : 'r') + (v.z > 0 ? 'r' : 'l')].push(v.x, v.z);
+      }
     });
+    for (const [k, p] of Object.entries(pts)) {
+      if (p.length < 6) continue;
+      const xs = p.filter((_, i) => i % 2 === 0).sort((a, b) => a - b);
+      let z0 = Infinity, z1 = -Infinity;
+      for (let i = 1; i < p.length; i += 2) { z0 = Math.min(z0, p[i]); z1 = Math.max(z1, p[i]); }
+      const r = (k[0] === 'f' ? design.dims.rf : design.dims.rr) || 0.34;
+      // the contact patch is the tread; reach outwards for the sidewall, inwards for brake and hub
+      const outer = k[1] === 'r';
+      cyl[k] = { x: xs[xs.length >> 1], y: r, r: r * 1.04, zMin: outer ? z0 - 0.16 : z0 - 0.07, zMax: outer ? z1 + 0.07 : z1 + 0.16 };
+    }
+  }
+  const haveCyl = Object.keys(cyl).length === 4;
+  const inCyl = (x, z, y) => {
+    for (const k in cyl) {
+      const c = cyl[k];
+      if (z >= c.zMin && z <= c.zMax && Math.hypot(x - c.x, y - c.y) < c.r) return k;
+    }
+    return null;
+  };
+
+  if (haveCyl) {
+    // meshes that reach into several wheels come from models merged by material (all four tyres, or
+    // tyres + bumpers, in one object): cut the wheels out of them. Something inside a single wheel
+    // (a brake duct, a hub) is left alone; a wheel-named mesh near no wheel (the spare) becomes body.
+    const boxes = Object.values(cyl).map((c) => new THREE.Box3(V3(c.x - c.r, 0, c.zMin), V3(c.x + c.r, c.y + c.r, c.zMax)));
+    for (const m of [...meshes]) {
+      const c = cat.get(m);
+      if (c !== 'wheel' && c !== 'body') continue;
+      const b = boxOf(m);
+      const hits = boxes.filter((cb) => cb.intersectsBox(b)).length;
+      if (c === 'wheel' && hits === 0) { cat.set(m, 'body'); continue; }
+      if (hits < 2) continue;
+      // tyre-type meshes: a triangle belongs to the wheel its centre is in. Body meshes: only when
+      // all three corners are inside, so big arch-liner triangles poking into the wheel stay put
+      const keyOf = c === 'wheel'
+        ? (x, z, y) => inCyl(x, z, y) || 'keep'
+        : (x, z, y, a, b, t) => { const k = inCyl(a.x, a.z, a.y); return k && inCyl(b.x, b.z, b.y) === k && inCyl(t.x, t.z, t.y) === k ? k : 'keep'; };
+      replace(m, splitMesh(m, keyOf), (p) => {
+        const k = p.userData.splitKey;
+        return !k ? c : k === 'keep' ? 'body' : 'wheel'; // no key: multi-material mesh, left whole
+      });
+    }
+  } else {
+    // geometric fallback for wheels when names don't say "wheel"
+    const wheelCount = [...cat.values()].filter((c) => c === 'wheel').length;
+    if (wheelCount < 4) {
+      meshes.forEach((m) => {
+        if (cat.get(m) !== 'body') return;
+        const b = boxOf(m), s = b.getSize(V3()), c = b.getCenter(V3());
+        const round = Math.abs(s.x - s.y) < 0.25 * Math.max(s.x, s.y) && s.y > 0.35 && s.y < 1.1;
+        const corner = Math.abs(c.x) > 0.18 * L && Math.abs(c.z) > 0.2 * W && c.y < 0.65;
+        const spans = s.x > 0.5 * L || s.z > 0.6 * W;
+        if ((round && corner) || (spans && /rubber|tire|tyre|rim|wheel|black/i.test(textOf(m, model)) && c.y < 0.6)) cat.set(m, 'wheel');
+      });
+    }
+    // split wheel meshes that contain several wheels at once
+    for (const m of [...meshes]) {
+      if (cat.get(m) !== 'wheel') continue;
+      const s = boxOf(m).getSize(V3());
+      if (s.x > 0.45 * L || s.z > 0.55 * W) replace(m, splitByQuadrant(m, 0, 0), 'wheel');
+    }
   }
 
-  // split wheel meshes that contain several wheels at once
+  // lamp meshes running the whole length of the car (head + tail lights in one object): cut front from rear
   for (const m of [...meshes]) {
-    if (cat.get(m) !== 'wheel') continue;
-    const s = boxOf(m).getSize(V3());
-    if (s.x > 0.45 * L || s.z > 0.55 * W) {
-      const parts = splitByQuadrant(m, 0, 0);
-      cat.delete(m);
-      parts.forEach((p) => cat.set(p, 'wheel'));
-      meshes.splice(meshes.indexOf(m), 1, ...parts);
-    }
+    if (cat.get(m) === 'light' && boxOf(m).getSize(V3()).x > 0.5 * L) replace(m, splitMesh(m, (x) => (x > 0 ? 'f' : 'r')), 'light');
   }
   // split door and lamp meshes that hold both sides at once (left + right in one object)
   for (const m of [...meshes]) {
     const c = cat.get(m);
     if (c !== 'door' && c !== 'light') continue;
     const b = boxOf(m);
-    if (Math.abs(b.getCenter(V3()).z) < 0.12 * W && b.getSize(V3()).z > 0.5 * W) {
-      const parts = splitBySide(m);
-      cat.delete(m);
-      parts.forEach((p) => cat.set(p, c));
-      meshes.splice(meshes.indexOf(m), 1, ...parts);
-    }
+    if (Math.abs(b.getCenter(V3()).z) < 0.12 * W && b.getSize(V3()).z > 0.5 * W) replace(m, splitBySide(m), c);
   }
   root.updateMatrixWorld(true);
 
@@ -329,7 +417,7 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
         ...base, metalness: Math.min(0.85, Math.max(0.35, mat.metalness ?? 0.5)), roughness: Math.min(mat.roughness ?? 0.4, 0.34),
         clearcoat: 1, clearcoatRoughness: 0.035, envMapIntensity: 1.05,
       });
-      if (!out.normalMap) { out.normalMap = flakes(); out.normalScale = new THREE.Vector2(0.035, 0.035); }
+      if (!out.normalMap && cfg.flakes !== false) { out.normalMap = flakes(); out.normalScale = new THREE.Vector2(0.035, 0.035); }
       if (!cfg.keepPaint) repaint(out, design.paint);
     } else if (kind === 'glass') {
       const c = (mat.color || new THREE.Color('#111')).clone().multiplyScalar(0.35);
@@ -338,7 +426,13 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
         envMapIntensity: 1.6, depthWrite: false, side: mat.side, clearcoat: 1, clearcoatRoughness: 0.02, name: mat.name,
       });
     } else if (kind === 'lens') {
-      out = new THREE.MeshPhysicalMaterial({ color: '#ffffff', metalness: 0, roughness: 0.02, transparent: true, opacity: Math.min(0.3, mat.opacity ?? 0.3), envMapIntensity: 1.6, depthWrite: false, side: mat.side, name: mat.name });
+      // clear headlamp glass; red or amber lenses keep their tint
+      const tint = mat.color && mat.color.r > 0.12 && mat.color.r > 3 * mat.color.g && mat.color.r > 3 * mat.color.b;
+      out = new THREE.MeshPhysicalMaterial({
+        color: tint ? mat.color.clone() : '#ffffff', metalness: 0, roughness: 0.02, transparent: true,
+        opacity: tint ? Math.max(0.5, mat.opacity ?? 0.5) : Math.min(0.3, mat.opacity ?? 0.3),
+        envMapIntensity: 1.6, depthWrite: false, side: mat.side, name: mat.name,
+      });
     } else if (kind === 'chrome') {
       out = mat.clone(); out.metalness = 1; out.roughness = Math.min(out.roughness ?? 0.1, 0.07);
     } else if (kind === 'rubber') {
@@ -349,6 +443,7 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
       out = mat.clone();
     }
     if ('envMapIntensity' in out && kind !== 'glass' && kind !== 'lens' && kind !== 'paint') out.envMapIntensity = 1;
+    if (cfg.frontSide && !out.transparent) { if (out === mat) out = mat.clone(); out.side = THREE.FrontSide; }
     matCache.set(key, out);
     return out;
   };
@@ -370,18 +465,23 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
     // explicit per-model choice of the paint material(s)
     meshes.forEach((m) => (Array.isArray(m.material) ? m.material : [m.material]).forEach((mt) => { if (mt && cfg.paint.test(mt.name || '')) paintMats.add(mt); }));
   } else {
-    const top = [...area.entries()].sort((a, b) => b[1] - a[1])[0];
-    if (top) paintMats.add(top[0]);
-    area.forEach((_, mt) => { const n = mt.name || ''; if (R.paint.test(n) && !R.glass.test(n) && !R.carbon.test(n)) paintMats.add(mt); });
+    // a material named as paint wins; otherwise the biggest body material that isn't trim
+    const named = [...area.keys()].filter((mt) => R.paint.test(mt.name || '') && !R.notPaint.test(mt.name || ''));
+    if (named.length) named.forEach((mt) => paintMats.add(mt));
+    else {
+      const top = [...area.entries()].filter(([mt]) => !R.notPaint.test(mt.name || '')).sort((a, b) => b[1] - a[1])[0];
+      if (top) paintMats.add(top[0]);
+    }
   }
 
   const kindOf = (m, mt) => {
     const t = `${textOf(m, model)} ${mt?.name || ''}`;
     const c = cat.get(m);
     if (!mt) return 'other';
-    if (paintMats.has(mt)) return 'paint';
+    // a wheel that shares the body material (one atlas for everything) keeps its own colours
+    if (paintMats.has(mt)) return c === 'wheel' ? 'other' : 'paint';
     if (R.carbon.test(mt.name || '')) return 'carbon';
-    if (c === 'light' && (mt.transparent || R.glass.test(t) || /lens/i.test(t))) return 'lens';
+    if (c === 'light' && ((mt.transparent && (mt.opacity ?? 1) < 0.9) || R.glass.test(t) || /lens/i.test(t))) return 'lens';
     if (R.glass.test(mt.name || '') || (mt.transparent && (mt.opacity ?? 1) < 0.9 && c !== 'light')) return 'glass';
     if (R.tire.test(mt.name || '') || (c === 'wheel' && R.tire.test(t) && !R.rim.test(mt.name || ''))) return 'rubber';
     if (R.chrome.test(mt.name || '') || ((mt.metalness ?? 0) > 0.9 && (mt.roughness ?? 1) < 0.25)) return 'chrome';
@@ -419,34 +519,86 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
     if (c.y > 0.9 || Math.abs(c.z) < 0.15 * W) { cat.set(m, 'body'); return; }
     corners[(c.x > 0 ? 'f' : 'r') + (c.z > 0 ? 'r' : 'l')].push(m);
   });
+  // piece type from its name, else from its material (dark and matte = tyre)
+  const typeOf = (m) => {
+    const t = textOf(m, model);
+    if (R.caliper.test(t)) return 'caliper';
+    if (R.tire.test(t)) return 'tyre';
+    if (R.disc.test(t)) return 'disc';
+    if (R.rim.test(t)) return 'rim';
+    const mt = matsOf(m)[0];
+    if (!mt?.color) return 'other';
+    let lum = 0.2126 * mt.color.r + 0.7152 * mt.color.g + 0.0722 * mt.color.b;
+    if (mt.map) { const st = textureStats(mt.map); if (st) lum *= Math.pow(st.lum, 2.2); }
+    return lum < 0.03 && (mt.metalness ?? 0) < 0.6 ? 'tyre' : 'rim';
+  };
   const wheelNames = { fr: 'Front-right wheel', fl: 'Front-left wheel', rr: 'Rear-right wheel', rl: 'Rear-left wheel' };
-  Object.entries(corners).forEach(([key, list]) => {
-    if (!list.length) return;
+  Object.entries(corners).forEach(([key, list0]) => {
+    if (!list0.length) return;
     const side = key[1] === 'r' ? 1 : -1;
     const front = key[0] === 'f';
-    let big = null, bigSize = 0;
-    list.forEach((m) => { const s = boxOf(m).getSize(V3()); const d = Math.max(s.x, s.y); if (d > bigSize) { bigSize = d; big = m; } });
-    const center = boxOf(big).getCenter(V3());
+    list0.forEach((m) => { m.userData.wheelType = typeOf(m); });
+    // spin axis: the wheel's own box (calipers left out) when it is round, else the ground-contact
+    // cylinder, else the biggest piece
+    const ub = new THREE.Box3();
+    list0.forEach((m) => { if (m.userData.wheelType !== 'caliper') ub.union(boxOf(m)); });
+    const us = ub.getSize(V3());
+    let center;
+    if (!ub.isEmpty() && us.y > 0.4 && us.y < 1.2 && Math.abs(us.x - us.y) < 0.2 * us.y) center = ub.getCenter(V3());
+    else if (cyl[key]) center = V3(cyl[key].x, cyl[key].y, ub.isEmpty() ? (side * W) / 2 - 0.2 : ub.getCenter(V3()).z);
+    else {
+      let big = null, bigSize = 0;
+      list0.forEach((m) => { const s = boxOf(m).getSize(V3()); const d = Math.max(s.x, s.y); if (d > bigSize) { bigSize = d; big = m; } });
+      center = boxOf(big).getCenter(V3());
+    }
     const pivot = new THREE.Group();
     pivot.position.copy(center);
     root.add(pivot);
     root.updateMatrixWorld(true);
     const fixed = new THREE.Group();
     pivot.add(fixed);
+
+    // some models build a wheel from hundreds of tiny pieces: merge them into one mesh per type and
+    // material (same look, far fewer draw calls)
+    const inv = pivot.matrixWorld.clone().invert();
+    const groups = new Map();
+    list0.forEach((m) => {
+      const mt = Array.isArray(m.material) ? null : m.material;
+      const k = mt && list0.length > 8 ? `${m.userData.wheelType}|${mt.uuid}|${Object.keys(m.geometry.attributes).sort().join()}` : m.uuid;
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(m);
+    });
+    const list = [];
+    groups.forEach((g) => {
+      if (g.length < 2) { list.push(g[0]); return; }
+      let merged = null;
+      try { merged = mergeGeometries(g.map((m) => floatGeometry(m.geometry, inv.clone().multiply(m.matrixWorld))), false); } catch { merged = null; }
+      if (!merged) { list.push(...g); return; }
+      const mm = new THREE.Mesh(merged, g[0].material);
+      mm.name = g[0].name;
+      mm.userData.wheelType = g[0].userData.wheelType;
+      mm.castShadow = mm.receiveShadow = true;
+      pivot.add(mm);
+      g.forEach((m) => { m.parent?.remove(m); cat.delete(m); meshes.splice(meshes.indexOf(m), 1); });
+      cat.set(mm, 'wheel');
+      meshes.push(mm);
+      list.push(mm);
+    });
+
     const id = `wheel-${key}`;
     const part = addPart(id, { key: 'wheels', name: wheelNames[key] });
     const seen = new Set();
     const tyreSpec = front ? info.tyreF : info.tyreR;
     list.forEach((m) => {
-      const t = textOf(m, model);
-      const isCal = R.caliper.test(t);
+      const type = m.userData.wheelType;
+      const isCal = type === 'caliper';
       (isCal ? fixed : pivot).attach(m);
-      let dir, label = null, type;
-      if (isCal) { type = 'caliper'; dir = V3(0, 0.22, side * 0.36); }
-      else if (R.tire.test(t)) { type = 'tyre'; dir = V3(0, 0, side * 0.9); }
-      else if (R.disc.test(t)) { type = 'disc'; dir = V3(0, 0, side * 0.32); }
-      else if (R.rim.test(t)) { type = 'rim'; dir = V3(0, 0, side * 0.6); }
-      else { type = 'other'; dir = V3(0, 0, side * 0.45); }
+      let dir, label = null;
+      if (isCal) dir = V3(0, 0.22, side * 0.36);
+      else if (type === 'tyre') dir = V3(0, 0, side * 0.9);
+      else if (type === 'disc') dir = V3(0, 0, side * 0.32);
+      else if (type === 'rim') dir = V3(0, 0, side * 0.6);
+      else dir = V3(0, 0, side * 0.45);
       if (!seen.has(type)) {
         seen.add(type);
         label = { tyre: `Tyre · ${tyreSpec || ''}`, rim: 'Forged alloy wheel', disc: `Brake disc · ${info.brakes || ''}`, caliper: 'Brake caliper', other: labelFor(m, 'Wheel hardware') }[type];
@@ -527,25 +679,32 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
     part.pieces.push({ obj: m, dir: V3((front ? 1 : -1) * (isLens ? 0.42 : 0.24), isLens ? 0.06 : 0.02, 0), label: null });
     tag(m, part.id, part.hover, true);
     if (front && c.y > 0.25 && c.y < 1.3) headCandidates.push({ m, c });
-    mats.forEach((mt) => {
-      if (!mt || mt.transparent) return;
-      if (front) { if ((mt.metalness ?? 0) < 0.85 && mt.color && mt.color.r + mt.color.g + mt.color.b > 1.2) headMats.add(mt); }
-      else if (mt.color && mt.color.r > 0.35 && mt.color.g < 0.25) tailMats.add(mt);
-    });
   });
+  // lamp emitters: bright, red or textured lamp materials (not lenses, housings or chrome).
+  // A material used at both ends (one lamp texture for the whole car) belongs to the end where
+  // most of its meshes sit: front = headlights, rear = tail lights.
+  const votes = new Map();
+  const vote = (m, mt) => votes.set(mt, (votes.get(mt) || 0) + Math.sign(boxOf(m).getCenter(V3()).x));
   if (cfg.lamps) {
-    // explicit per-model choice of the lamp emitter materials (front = headlights, rear = tail lights)
-    headMats.clear();
-    tailMats.clear();
-    meshes.forEach((m) => {
-      const front = boxOf(m).getCenter(V3()).x > 0;
-      (Array.isArray(m.material) ? m.material : [m.material]).forEach((mt) => {
-        if (mt && !mt.transparent && cfg.lamps.test(mt.name || '')) (front ? headMats : tailMats).add(mt);
-      });
-    });
+    // explicit per-model choice (may include a red lens that should glow)
+    meshes.forEach((m) => matsOf(m).forEach((mt) => { if (cfg.lamps.test(mt.name || '')) vote(m, mt); }));
+  } else {
+    // only materials used mostly on lamps (not the cabin trim or badges a lamp happens to share)
+    const use = new Map();
+    meshes.forEach((m) => matsOf(m).forEach((mt) => { const u = use.get(mt) || [0, 0]; u[cat.get(m) === 'light' ? 0 : 1]++; use.set(mt, u); }));
+    meshes.filter((m) => cat.get(m) === 'light').forEach((m) => matsOf(m).forEach((mt) => {
+      const bright = mt.color && mt.color.r + mt.color.g + mt.color.b > 1.2;
+      const red = mt.color && mt.color.r > 0.12 && mt.color.r > 4 * mt.color.g && mt.color.r > 4 * mt.color.b;
+      if (use.get(mt)[0] < use.get(mt)[1]) return;
+      if ((mt.transparent && mt.opacity < 0.9 && !red) || /plastic|chrome|housing|black|rubber|carbon|trim|badge|logo|emblem|interior/i.test(mt.name || '')) return;
+      if (mt.map || ((mt.metalness ?? 0) < 0.85 && (bright || red))) vote(m, mt);
+    }));
   }
+  votes.forEach((v, mt) => { if (mt.emissive) (v >= 0 ? headMats : tailMats).add(mt); });
   [...headMats, ...tailMats].forEach((mt) => {
-    if (mt.emissive) { mt.userData.emissive0 = mt.emissive.clone(); mt.userData.emissiveIntensity0 = mt.emissiveIntensity; }
+    mt.userData.emissive0 = mt.emissive.clone();
+    mt.userData.emissiveIntensity0 = mt.emissiveIntensity;
+    mt.userData.emissiveMap0 = mt.emissiveMap;
   });
   const firstLabel = (part, text) => { const p = part.pieces[0]; if (p) p.label = text; const lens = part.pieces.find((x) => x.dir.x * x.dir.x > 0.1); if (lens && lens !== p) lens.label = `${text.split(' ')[0]} lens`; };
   firstLabel(headPart, 'Headlamp unit');
@@ -574,10 +733,22 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
   });
   glowFallback.visible = false;
   root.add(glowFallback);
-  const restore = (mt) => { mt.emissive.copy(mt.userData.emissive0); mt.emissiveIntensity = mt.userData.emissiveIntensity0; };
+  const setEmissiveMap = (mt, map) => { if (mt.emissiveMap !== map) { mt.emissiveMap = map; mt.needsUpdate = true; } };
+  const restore = (mt) => {
+    mt.emissive.copy(mt.userData.emissive0);
+    mt.emissiveIntensity = mt.userData.emissiveIntensity0;
+    setEmissiveMap(mt, mt.userData.emissiveMap0);
+  };
+  // a textured lamp glows with its own texture (white LEDs stay white, red lenses stay red);
+  // a red lens glows red wherever it sits
+  const light = (mt, color, intensity) => {
+    const red = mt.color && mt.color.r > 0.12 && mt.color.r > 4 * mt.color.g && mt.color.r > 4 * mt.color.b;
+    if (mt.map) { setEmissiveMap(mt, mt.map); mt.emissive.set('#ffffff'); mt.emissiveIntensity = intensity * 0.8; }
+    else { mt.emissive.set(red ? '#ff1022' : color); mt.emissiveIntensity = intensity; }
+  };
   const setHeadlights = (on) => {
-    headMats.forEach((mt) => { if (!mt.emissive) return; if (on) { mt.emissive.set('#fff3e2'); mt.emissiveIntensity = 2.4; } else restore(mt); });
-    tailMats.forEach((mt) => { if (!mt.emissive) return; if (on) { mt.emissive.set('#ff1022'); mt.emissiveIntensity = 2.6; } else restore(mt); });
+    headMats.forEach((mt) => (on ? light(mt, '#fff3e2', 2.4) : restore(mt)));
+    tailMats.forEach((mt) => (on ? light(mt, '#ff1022', 2.6) : restore(mt)));
     glowFallback.visible = on && headMats.size === 0;
   };
 
@@ -625,6 +796,20 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
   });
   if (hood) hood.list.forEach((m) => tag(m, 'engine', `${engineAtRear ? 'Front lid' : 'Bonnet'} · click for X-RAY engine`, true));
   if (cover) cover.list.forEach((m) => tag(m, 'engine', 'Engine cover · click for X-RAY engine', true));
+  // one-piece bodies (no separate bonnet): the top of the body over the engine still opens the X-ray
+  if (!hood || (engineAtRear && !cover)) {
+    const n = V3(), p = V3();
+    const zone = (h) => {
+      if (!h.face) return null;
+      n.copy(h.face.normal).transformDirection(h.object.matrixWorld);
+      if (n.y < 0.5) return null; // only surfaces facing up
+      root.worldToLocal(p.copy(h.point));
+      if (!hood && p.x > 0.2 * L) return ['engine', `${engineAtRear ? 'Front lid' : 'Bonnet'} · click for X-RAY engine`];
+      if (engineAtRear && !cover && p.x < -0.12 * L) return ['engine', 'Engine cover · click for X-RAY engine'];
+      return null;
+    };
+    meshes.forEach((m) => { if (m.userData.partId === 'chassis') m.userData.zone = zone; });
+  }
 
   // ---------------- engine, chassis and exhaust internals borrowed from the procedural car
   const internals = [];
@@ -680,6 +865,8 @@ export async function loadRealCar({ slug, cfg, design, info, proc, onProgress, u
       return { cat: c, name: m.name, text: textOf(m, model).slice(0, 120), tris: Math.round((m.geometry.index ? m.geometry.index.count : m.geometry.attributes.position.count) / 3), c: b.getCenter(V3()).toArray().map((v) => +v.toFixed(2)), s: b.getSize(V3()).toArray().map((v) => +v.toFixed(2)) };
     }),
     paint: [...paintMats].map((m) => m.name),
+    lamps: { head: [...headMats].map((m) => m.name), tail: [...tailMats].map((m) => m.name) },
+    cyl,
   };
 
   return {

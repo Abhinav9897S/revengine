@@ -5,34 +5,37 @@ import * as THREE from 'three';
 import { HDRLoader } from 'three/addons/loaders/HDRLoader.js';
 import { GroundedSkybox } from 'three/addons/objects/GroundedSkybox.js';
 import { Reflector } from 'three/addons/objects/Reflector.js';
-import { RectAreaLightUniformsLib } from 'three/addons/lights/RectAreaLightUniformsLib.js';
 import { HorizontalBlurShader } from 'three/addons/shaders/HorizontalBlurShader.js';
 import { VerticalBlurShader } from 'three/addons/shaders/VerticalBlurShader.js';
+
+// photos live in public/env; BASE_URL keeps them working when the site is served from a sub-path
+const ENV = `${import.meta.env.BASE_URL}env/`;
 
 export const SCENES = [
   {
     id: 'rooftop', name: 'Rooftop car park', time: 'Twilight', credit: 'Rooftop Night · Poly Haven (CC0)',
-    hdr: '/env/rooftop_night.hdr', bg: '/env/rooftop_night_bg.jpg', height: 2.2, radius: 70, rot: 2.2,
-    envIntensity: 0.95, exposure: 1.0, night: true, sun: 0.4,
+    hdr: `${ENV}rooftop_night.hdr`, bg: `${ENV}rooftop_night_bg.jpg`, height: 2.2, radius: 70, rot: 2.2,
+    // night scenes: less image light so paint keeps its colour and reflections stay crisp
+    envIntensity: 0.7, exposure: 1.0, night: true, sun: 0.4,
   },
   {
     id: 'neon', name: 'Neon riverside', time: 'Night · rain', credit: 'Shanghai Bund · Poly Haven (CC0)',
-    hdr: '/env/shanghai_bund.hdr', bg: '/env/shanghai_bund_bg.jpg', height: 2.0, radius: 90, rot: 1.8,
-    envIntensity: 0.9, exposure: 1.0, night: true, rain: true, sun: 0.25,
+    hdr: `${ENV}shanghai_bund.hdr`, bg: `${ENV}shanghai_bund_bg.jpg`, height: 2.0, radius: 90, rot: 1.8,
+    envIntensity: 0.55, exposure: 1.0, night: true, rain: true, sun: 0.25,
   },
   {
     id: 'desert', name: 'Desert highway', time: 'Midday sun', credit: 'Nowhere Road · Poly Haven (CC0)',
-    hdr: '/env/nowhere_road.hdr', bg: '/env/nowhere_road_bg.jpg', height: 1.8, radius: 120, rot: 0.6, bgGain: 3.7,
+    hdr: `${ENV}nowhere_road.hdr`, bg: `${ENV}nowhere_road_bg.jpg`, height: 1.8, radius: 120, rot: 0.6, bgGain: 3.7,
     envIntensity: 1.0, exposure: 0.9, night: false, sun: 2.4,
   },
   {
     id: 'garage', name: 'Underground garage', time: 'Fluorescent', credit: 'Parking Garage · Poly Haven (CC0)',
-    hdr: '/env/parking_garage.hdr', bg: '/env/parking_garage_bg.jpg', height: 2.0, radius: 26, rot: 3.14,
-    envIntensity: 1.0, exposure: 1.0, night: true, sun: 0.5,
+    hdr: `${ENV}parking_garage.hdr`, bg: `${ENV}parking_garage_bg.jpg`, height: 2.0, radius: 26, rot: 3.14,
+    envIntensity: 0.8, exposure: 1.0, night: true, sun: 0.5,
   },
   {
     id: 'studio', name: 'Studio reveal', time: 'Softbox', credit: 'Studio Small 09 · Poly Haven (CC0)',
-    hdr: '/env/studio_small_09.hdr', studio: true, rot: 0, envIntensity: 0.5, exposure: 0.95, night: false, sun: 0,
+    hdr: `${ENV}studio_small_09.hdr`, studio: true, rot: 0, envIntensity: 0.85, exposure: 0.95, night: false, sun: 0,
   },
 ];
 
@@ -52,12 +55,11 @@ export class Atmosphere {
     this.current = null;
     this.car = null;
     this.time = 0;
-    RectAreaLightUniformsLib.init();
 
     // sun (direction measured from the photo) + shadow catcher on the ground
     this.sun = new THREE.DirectionalLight('#ffffff', 0);
     this.sun.castShadow = true;
-    this.sun.shadow.mapSize.set(quality === 'high' ? 2048 : 1024, quality === 'high' ? 2048 : 1024);
+    this.sun.shadow.mapSize.set(quality === 'low' ? 1024 : 2048, quality === 'low' ? 1024 : 2048);
     const sc = this.sun.shadow.camera;
     sc.left = -5; sc.right = 5; sc.top = 5; sc.bottom = -5; sc.near = 0.5; sc.far = 40;
     this.sun.shadow.bias = -0.0002;
@@ -109,6 +111,7 @@ export class Atmosphere {
   apply({ cfg, hdr, env, bg, sun }) {
     this.clear();
     this.current = cfg;
+    this.dirty = 3; // new sun and ground: redraw the shadows
     const scene = this.scene;
     const rot = cfg.rot || 0;
     scene.environment = env;
@@ -194,10 +197,11 @@ export class Atmosphere {
     cove.raycast = () => {};
     g.add(cove);
     // polished black floor: a mirror, darkened by a plain black layer (no specular sheen of its own)
-    const high = this.quality === 'high';
+    const high = this.quality !== 'low';
     if (high) {
       const mirror = new Reflector(new THREE.CircleGeometry(12, 96), {
-        clipBias: 0.003, textureWidth: Math.min(2048, innerWidth), textureHeight: Math.min(2048, innerHeight), color: 0x8a8a90,
+        // the floor is darkened and glossy: a half-resolution reflection looks the same and costs a quarter
+        clipBias: 0.003, textureWidth: Math.min(1024, Math.round(innerWidth * 0.5)), textureHeight: Math.min(1024, Math.round(innerHeight * 0.5)), color: 0x8a8a90,
       });
       mirror.rotation.x = -Math.PI / 2;
       mirror.position.y = 0.0005;
@@ -212,26 +216,13 @@ export class Atmosphere {
     floor.receiveShadow = true;
     floor.raycast = () => {};
     g.add(floor);
-    // softboxes: big overhead panel + two tall strips (they draw the long light lines on the paint)
-    const panel = (w, h, intensity, pos, look) => {
-      const light = new THREE.RectAreaLight('#fff4ea', intensity, w, h);
-      light.position.set(...pos);
-      light.lookAt(...look);
-      const mesh = new THREE.Mesh(new THREE.PlaneGeometry(w, h), new THREE.MeshBasicMaterial({ color: new THREE.Color('#fff4ea').multiplyScalar(1.25), side: THREE.DoubleSide, fog: false }));
-      mesh.position.copy(light.position);
-      mesh.quaternion.copy(light.quaternion);
-      mesh.raycast = () => {};
-      g.add(light, mesh);
-    };
-    panel(7, 2.6, 4, [0, 5.2, 0], [0, 0, 0]);
-    panel(0.5, 3.8, 7, [-1.2, 2.3, 8.2], [0, 0.7, 0]);
-    panel(0.5, 3.8, 7, [-1.2, 2.3, -8.2], [0, 0.7, 0]);
-    panel(3.2, 0.5, 5, [-6.5, 2.2, 0], [0, 0.6, 0]);
+    // (no rectangle area lights or visible softbox panels: the studio photo already lights the car
+    // and puts the softbox lines in the paint; area lights were the costliest thing per pixel)
   }
 
   // ------------------------------------------------------------------ contact shadow
   initContactShadow() {
-    const size = 9, res = this.quality === 'high' ? 512 : 256;
+    const size = 9, res = this.quality === 'low' ? 256 : 512;
     this.cs = { size, height: 0.9, darkness: 1.7, blur: 2.6, res };
     const rt = new THREE.WebGLRenderTarget(res, res);
     rt.texture.generateMipmaps = false;
@@ -323,8 +314,8 @@ export class Atmosphere {
         float lamp(vec3 p){
           vec3 v = vW - p; float d = max(length(v), 0.001); vec3 n = v / d;
           float c = dot(n, normalize(uDir));
-          float cone = smoothstep(0.86, 0.97, c);
-          return cone * 2.2 / (1.0 + d * d * 0.45) * smoothstep(0.3, 1.4, d);
+          float cone = smoothstep(0.8, 0.97, c);
+          return cone * 1.15 / (1.0 + d * d * 0.35) * smoothstep(0.3, 1.6, d);
         }
         void main(){
           float k = (lamp(uA) + lamp(uB)) * uStrength;
@@ -353,24 +344,44 @@ export class Atmosphere {
   setNight(on) {
     this.night = on;
     this.lights.pool.visible = on;
-    this.lights.beams.visible = on && this.quality === 'high';
+    // the volumetric beam cones read as a haze over the car from the usual 3/4 camera: off.
+    // The light pool on the ground carries the headlight look.
+    this.lights.beams.visible = false;
     this.lights.uniforms.uStrength.value = on ? 1 : 0;
     this.car?.setHeadlights?.(on);
   }
 
   // ------------------------------------------------------------------ rain
+  // The drops fall in the vertex shader (one time uniform per frame): no per-frame JavaScript
+  // loop or buffer upload. Each streak is two vertices sharing a start height and speed.
   initRain() {
-    const N = this.quality === 'high' ? 5000 : 2000;
+    const N = this.quality === 'low' ? 1500 : 3500;
+    const H = 12;
     const pos = new Float32Array(N * 6);
-    this.rainData = { N, box: new THREE.Vector3(26, 12, 26), speed: new Float32Array(N) };
+    const drop = new Float32Array(N * 6); // per vertex: start height, speed, offset along the streak
     for (let i = 0; i < N; i++) {
-      const x = (Math.random() - 0.5) * 26, y = Math.random() * 12, z = (Math.random() - 0.5) * 26, l = 0.25 + Math.random() * 0.25;
-      pos.set([x, y, z, x + 0.03, y - l, z], i * 6);
-      this.rainData.speed[i] = 14 + Math.random() * 8;
+      const x = (Math.random() - 0.5) * 26, y = Math.random() * H, z = (Math.random() - 0.5) * 26, l = 0.25 + Math.random() * 0.25;
+      const sp = 14 + Math.random() * 8;
+      pos.set([x, 0, z, x + 0.03, 0, z], i * 6);
+      drop.set([y, sp, 0, y, sp, -l], i * 6);
     }
     const geo = new THREE.BufferGeometry();
     geo.setAttribute('position', new THREE.BufferAttribute(pos, 3));
-    this.rain = new THREE.LineSegments(geo, new THREE.LineBasicMaterial({ color: '#a9c8ff', transparent: true, opacity: 0.28, depthWrite: false, blending: THREE.AdditiveBlending }));
+    geo.setAttribute('aDrop', new THREE.BufferAttribute(drop, 3));
+    this.rainTime = { value: 0 };
+    const mat = new THREE.ShaderMaterial({
+      uniforms: { uTime: this.rainTime, uColor: { value: new THREE.Color('#a9c8ff') } },
+      vertexShader: /* glsl */`
+        attribute vec3 aDrop;
+        uniform float uTime;
+        void main(){
+          float y = mod(aDrop.x - uTime * aDrop.y, ${H.toFixed(1)}) + aDrop.z;
+          gl_Position = projectionMatrix * modelViewMatrix * vec4(position.x, y, position.z, 1.0);
+        }`,
+      fragmentShader: 'uniform vec3 uColor; void main(){ gl_FragColor = vec4(uColor * 0.28, 1.0); }',
+      transparent: true, depthWrite: false, blending: THREE.AdditiveBlending,
+    });
+    this.rain = new THREE.LineSegments(geo, mat);
     this.rain.frustumCulled = false;
     this.rain.visible = false;
     this.rain.raycast = () => {};
@@ -382,6 +393,24 @@ export class Atmosphere {
     this.car = car;
     car.root.traverse((o) => { if (o.isMesh) o.layers.enable(2); });
     car.setHeadlights?.(this.night);
+    this.dirty = 3;
+  }
+
+  // A cheap fingerprint of everything that moves on the car (body, wheels, doors, exploded
+  // pieces, X-ray internals). The sun shadow and the contact shadow are only redrawn when it
+  // changes; a parked car costs no extra shadow renders per frame.
+  carSignature(car) {
+    let s = 0, k = 1;
+    const add = (o) => {
+      const p = o.position, r = o.rotation;
+      s += (p.x * 1.3 + p.y * 2.1 + p.z * 3.7 + r.x * 5.1 + r.y * 7.3 + r.z * 11.9 + (o.visible ? 0.7 : 0)) * k;
+      k = k > 50 ? 1 : k + 0.37;
+    };
+    add(car.root);
+    car.spins?.forEach(add);
+    car.internals?.forEach(add);
+    car.parts.forEach((p) => { p.moves.forEach((m) => add(m.obj)); p.pieces.forEach((pc) => add(pc.obj)); });
+    return s;
   }
 
   update(dt) {
@@ -392,7 +421,14 @@ export class Atmosphere {
       this.cs.grp.position.set(root.position.x, 0, root.position.z);
       const s = Math.max(car.dims.L, 4) / 4.6;
       this.cs.grp.scale.set(s, 1, s);
-      this.renderContactShadow();
+      const sig = this.carSignature(car);
+      if (sig !== this.sig) { this.sig = sig; this.dirty = Math.max(this.dirty || 0, 2); }
+      if (this.stage.shadowsDirty) { this.dirty = Math.max(this.dirty || 0, this.stage.shadowsDirty); this.stage.shadowsDirty = 0; }
+      if (this.dirty > 0) {
+        this.renderContactShadow();
+        this.renderer.shadowMap.needsUpdate = true;
+        this.dirty--;
+      }
       if (this.night && car.headlightPos) {
         const [a, b] = car.headlightPos;
         const { uniforms, beams } = this.lights;
@@ -406,15 +442,7 @@ export class Atmosphere {
       }
     }
     if (this.rain.visible) {
-      const p = this.rain.geometry.attributes.position.array;
-      const { N, speed } = this.rainData;
-      for (let i = 0; i < N; i++) {
-        const k = i * 6;
-        const d = speed[i] * dt;
-        p[k + 1] -= d; p[k + 4] -= d;
-        if (p[k + 4] < 0) { const h = 12 + Math.random() * 2; p[k + 1] += h; p[k + 4] += h; }
-      }
-      this.rain.geometry.attributes.position.needsUpdate = true;
+      this.rainTime.value = this.time;
       const t = this.stage.controls.target;
       this.rain.position.set(t.x, 0, t.z);
     }
