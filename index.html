@@ -1,0 +1,174 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#0b0614" />
+  <title>RevEngine · Interactive 3D Car Showroom</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect rx='14' width='64' height='64' fill='%23120a1e'/><path d='M10 40 L22 24 H42 L54 40 Z' fill='%23ff2fb4'/><circle cx='20' cy='42' r='6' fill='%232fd9ff'/><circle cx='44' cy='42' r='6' fill='%232fd9ff'/></svg>" />
+  <script type="module" crossorigin src="/revengine/assets/index-IGNkXh48.js"></script>
+  <link rel="stylesheet" crossorigin href="/revengine/assets/index-Stau0mpx.css">
+</head>
+<body>
+  <div id="app">
+    <div id="stage"></div>
+    <div id="vignette"></div>
+
+    <!-- ===== top bar ===== -->
+    <header id="topbar" class="hud">
+      <span class="logo">REV<b>ENGINE</b></span>
+      <nav id="tabs">
+        <button data-view="showroom" class="on">Showroom</button>
+        <button data-view="garage">Garage</button>
+        <button data-view="compare">Compare</button>
+        <button data-view="sqllab">SQL Lab</button>
+      </nav>
+      <div class="tools">
+        <button id="btn-loc" class="pill" title="Change location (L)"><span id="loc-name">Location</span><span class="caret">▾</span></button>
+        <button id="btn-sound" class="pill icon" title="Sound (M)">🔊</button>
+      </div>
+    </header>
+
+    <!-- ===== car panel ===== -->
+    <section id="carinfo" class="hud">
+      <div class="maker" id="ci-maker"></div>
+      <h1 class="model" id="ci-model"></h1>
+      <p class="tagline" id="ci-tagline"></p>
+      <p class="specline" id="ci-chips"></p>
+      <div class="figs" id="ci-stats"></div>
+      <div class="price"><span>From</span><b id="ci-price"></b></div>
+      <div class="actions">
+        <button id="btn-engine" class="pill primary" title="Open the engine (or click the bonnet)">X-ray engine</button>
+        <button id="btn-explode" class="pill" title="Pull the whole car apart (E)">Explode</button>
+        <button id="btn-ad" class="pill" title="Car-advert camera (C)">▶ Ad mode</button>
+      </div>
+      <p class="hint">Hover the car to explore its parts · drag to look around</p>
+    </section>
+
+    <!-- ===== parts ===== -->
+    <section id="parts" class="hud">
+      <div class="panel">
+        <div class="panel-head"><span>Explore parts</span><small>click a part on the car</small></div>
+        <div id="partlist"></div>
+      </div>
+      <div class="panel" id="partinfo" hidden>
+        <div class="panel-head"><span id="pi-system"></span><button id="pi-back">✕ Close</button></div>
+        <h2 id="pi-name"></h2>
+        <p id="pi-desc"></p>
+        <div id="pi-spec"></div>
+        <div id="pi-piece"></div>
+        <ul id="pi-pieces"></ul>
+      </div>
+    </section>
+
+    <!-- ===== carousel ===== -->
+    <footer id="carousel" class="hud">
+      <button class="nav prev" aria-label="Previous car">‹</button>
+      <div id="cards"></div>
+      <button class="nav next" aria-label="Next car">›</button>
+    </footer>
+    <div id="tooltip"></div>
+    <div id="toast"></div>
+    <section id="locations" class="hud"></section>
+    <div id="loading"><span></span><b><i></i></b></div>
+    <div id="adcard"></div>
+    <button id="ad-exit" class="pill" title="Leave Ad mode (Esc)">✕ Exit ad mode</button>
+    <div id="fade"></div>
+    <footer id="footnote" class="hud"><button id="btn-credits">Credits &amp; licences</button></footer>
+
+    <!-- ===== credits ===== -->
+    <section id="credits" class="overlay" hidden>
+      <div class="overlay-inner">
+        <div class="overlay-head">
+          <h2>Credits</h2>
+          <p>Real 3D models and 360° photos used in RevEngine, loaded from the <code>assets</code> table. Their licences require this credit.</p>
+        </div>
+        <button id="credits-close" class="close">✕ Close</button>
+        <table class="credits"><thead><tr><th>Type</th><th>Asset</th><th>Author</th><th>Licence</th></tr></thead><tbody id="credits-list"></tbody></table>
+        <pre id="credits-sql" class="sql"></pre>
+      </div>
+    </section>
+
+    <!-- ===== garage (SQL powered) ===== -->
+    <section id="garage" class="overlay" hidden>
+      <div class="overlay-inner">
+        <div class="overlay-head">
+          <h2>Garage</h2>
+          <p>Every card below comes from a live SQL query on a SQLite database running inside your browser.</p>
+        </div>
+        <div class="filters">
+          <input id="f-search" type="search" placeholder="Search model or maker…" />
+          <select id="f-maker"><option value="">All makers</option></select>
+          <select id="f-layout"><option value="">All engines</option></select>
+          <select id="f-position"><option value="">Any position</option></select>
+          <select id="f-drive"><option value="">Any drive</option></select>
+          <label class="range">Min power <input id="f-power" type="range" min="0" max="1500" step="50" value="0" /><b id="f-power-v">0 hp</b></label>
+          <select id="f-sort">
+            <option value="power">Sort: Power</option>
+            <option value="torque">Sort: Torque</option>
+            <option value="speed">Sort: Top speed</option>
+            <option value="accel">Sort: 0-100 km/h</option>
+            <option value="ratio">Sort: hp / tonne</option>
+            <option value="year">Sort: Year</option>
+            <option value="weight">Sort: Weight</option>
+            <option value="price">Sort: Price</option>
+            <option value="name">Sort: Name</option>
+          </select>
+          <button id="f-dir" data-dir="desc">▼ High → Low</button>
+        </div>
+        <pre id="garage-sql" class="sql"></pre>
+        <div id="garage-grid"></div>
+      </div>
+    </section>
+
+    <!-- ===== compare ===== -->
+    <section id="compare" class="overlay" hidden>
+      <div class="overlay-inner">
+        <div class="overlay-head">
+          <h2>Head to head</h2>
+          <p>Pick two cars. The numbers come from a JOIN across the <code>cars</code>, <code>engines</code> and <code>manufacturers</code> tables.</p>
+        </div>
+        <div class="vs">
+          <select id="cmp-a"></select><span class="vs-badge">VS</span><select id="cmp-b"></select>
+        </div>
+        <div id="cmp-body"></div>
+        <pre id="cmp-sql" class="sql"></pre>
+      </div>
+    </section>
+
+    <!-- ===== SQL lab ===== -->
+    <section id="sqllab" class="overlay" hidden>
+      <div class="overlay-inner">
+        <div class="overlay-head">
+          <h2>SQL Lab</h2>
+          <p>Run your own queries against the RevEngine database. Tables: <code>manufacturers</code>, <code>engines</code>, <code>cars</code>, <code>part_types</code>, <code>car_parts</code>, <code>assets</code> and the view <code>car_overview</code>.</p>
+        </div>
+        <div class="lab-presets" id="lab-presets"></div>
+        <textarea id="lab-input" spellcheck="false"></textarea>
+        <div class="lab-actions">
+          <button id="lab-run" class="primary">▶ Run query <span class="key">Ctrl+Enter</span></button>
+          <button id="lab-reset">Reset database</button>
+          <span id="lab-meta"></span>
+        </div>
+        <div id="lab-out"></div>
+      </div>
+    </section>
+
+    <!-- ===== loading / title screen ===== -->
+    <div id="loader">
+      <div class="stripes"></div>
+      <div class="sun"></div>
+      <div class="loader-inner">
+        <div class="kicker">A G1 batch production</div>
+        <h1 class="title">REV<span>ENGINE</span></h1>
+        <p class="sub">10 machines. Every bolt. One click.</p>
+        <div class="bar"><i id="load-bar"></i></div>
+        <div class="status"><span id="load-status">Starting engines…</span><b id="load-pct">0%</b></div>
+        <button id="start" hidden>Press <span class="key">Enter</span> to start</button>
+        <p class="tip" id="load-tip"></p>
+      </div>
+      <div class="credits">Abhinav Singh · Aarav Singh · Aryaman Gora</div>
+    </div>
+  </div>
+</body>
+</html>
